@@ -621,6 +621,9 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
             if (four && (want == VK_FORMAT_R32_SFLOAT || want == VK_FORMAT_R8G8B8A8_UNORM)) view_format = want;
         }
     }
+    int reformat = 0;   // a sampled RGB9E5 view of an R11G11B10F image (vk_texture.c slot_resolve)
+    if (!storage && hv && v->set_format && v->format == 0x40 && img->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32)
+        view_format = VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, reformat = 1;
     ViewKey k = {img->image, view_format, vt, aspect, l0, nl, y0, ny, swz};
     if (!view_of.klen) nvn_hm_init(&view_of, sizeof(ViewKey)), nvn_hm_init(&views_by_image, sizeof(VkImage));
     VkImageView found = (VkImageView)nvn_hm_get(&view_of, &k);
@@ -631,7 +634,8 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
                                 .subresourceRange = {aspect, l0, nl, y0, ny}};
     VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
                                       .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
-    if (img->block_views) ci.pNext = &use;   // the image's COLOR_ATTACHMENT usage is its block views' (vk_texture.c)
+    if (img->block_views || reformat) ci.pNext = &use;   // block views: the image's COLOR_ATTACHMENT usage is theirs
+                                                           // (vk_texture.c); RGB9E5 has no storage or attachment feature
     else if (!storage && vk_srgb_store_format(view_format) != view_format && (img->usage & VK_IMAGE_USAGE_STORAGE_BIT))
         use.usage = img->usage & ~VK_IMAGE_USAGE_STORAGE_BIT, ci.pNext = &use;   // sRGB views have no storage feature
     VkImageView view;
