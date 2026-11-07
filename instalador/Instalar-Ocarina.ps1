@@ -234,7 +234,8 @@ function Exec([string]$exe, [string[]]$argumentos, [switch]$PodeFalhar, [string]
     $destino = if ($Saida) { "> `"$Saida`"" } else { ">> `"$LOG`"" }
     Registrar "> $exe $q"
     $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = "$env:ComSpec"
+    # ComSpec can be missing from the environment (issue #102: "nao foi fornecido um nome de arquivo")
+    $psi.FileName = if ($env:ComSpec -and (Test-Path -LiteralPath $env:ComSpec)) { $env:ComSpec } else { Join-Path $env:SystemRoot 'System32\cmd.exe' }
     $psi.Arguments = "/d /s /c `"`"$exe`" $q $destino 2>&1`""
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     if (Test-Path $script:pasta) { $psi.WorkingDirectory = $script:pasta }
