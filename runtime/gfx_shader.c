@@ -2289,6 +2289,15 @@ const GfxShader *gfx_shader_load_input(const uint8_t iid[32], int xlate) {
     return t && !memcmp(t->iid, iid, 32) ? t : NULL;
 }
 
+uint64_t gfx_shader_input_origin(const uint8_t iid[32]) {   // LOCAL TEST (Ocarina): --warm-big-cs matches DKB_SKIP_CS
+    Inputs in;
+    paths();
+    if (!cache_dir[0] || !in_load(iid, &in)) return 0;
+    uint64_t origin = nvn2_origin(in.code);
+    free(in.buf);
+    return origin;
+}
+
 // From the disk cache only, as a shader the caller owns and releases with gfx_shader_release_private (the boot library
 // prebuild warms the driver's pipeline cache with it without keeping 40 KB per shader in memory). When the memory
 // cache has it, that entry is returned with *owned 0 and must not be released. NULL when not cached.

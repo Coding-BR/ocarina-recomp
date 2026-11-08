@@ -2475,10 +2475,10 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     }
     }
     uint64_t gwords = 0;
-    {   // LOCAL TEST (Ocarina, AMD): a guarded graphics pipeline (vertex+fragment over big_cs_words()) takes the AMD
-        // driver many minutes and 10+ GB, which kept the Kokiri forest black: built without optimization, as big compute
-        // shaders are. OOT_BIG_GFX_OPT=1 keeps the optimizer.
-        static int opt = -1;   // optimized by default now (see compute_create); OOT_BIG_GFX_NOOPT=1 builds them without
+    {   // LOCAL TEST (Ocarina): OOT_BIG_GFX_NOOPT=1 builds a guarded graphics pipeline (vertex + fragment of big_cs_words()
+        // or more, OOT_BIG_GFX_BINDINGS bindings or more) without optimization. Off by default on every GPU: on an RX 580 the
+        // unoptimized build was not faster (8-10 minutes each) and the result ran slower.
+        static int opt = -1;
         if (opt < 0) opt = getenv("OOT_BIG_GFX_NOOPT") == NULL;
         const GfxShader *st[4] = {s->ts, s->vs, s->gs, s->fs};
         for (int i = 0; i < 4; i++) {
@@ -2897,6 +2897,7 @@ typedef struct Job {
     uint8_t prebuild, demanded;        // from the key file; a draw asked for it before it was ready
     uint8_t large;                     // keep in the low queue so ordinary draws retain a worker
     uint8_t probed, slot;              // large: cache probe done (or off); holds one of the OOT_BIG_GFX_WORKERS slots
+    uint8_t big;                       // AMD: big_cs_words() or more, set once when queued (head_pick)
     int worker;                        // running on A.thread[worker]; -1 queued
     VkPipeState s;
     GKey k;
@@ -3086,18 +3087,7 @@ static void prebuild_report(void) {
 // LOCAL TEST (Ocarina, AMD): a big (guarded) graphics pipeline compiles for ~10 minutes on the AMD driver. Only worker
 // 0 takes those, and every worker takes small jobs first: with both workers on big ones, the ordinary pipelines of
 // the scene (milliseconds each) waited behind them and the Kokiri forest stayed black. OOT_BIG_GFX_WORKERS=n lets
-// workers 0..n-1 take big jobs (default 1).
-static int job_big(const Job *j) {
-    const GfxShader *st[4] = {j->s.ts, j->s.vs, j->s.gs, j->s.fs};
-    uint64_t total = 0;
-    for (int i = 0; i < 4; i++) {
-        uint64_t w = 0;
-        if (st[i]) gfx_shader_spirv(st[i], &w);
-        total += w;
-    }
-    return total >= big_cs_words();
-}
-
+// workers 0..n-1 take big jobs (default 1). Other GPUs take the queue in order.
 // The draw-queue job worker `me` should run next (small first, then big if allowed), unlinked when take; P.lock held.
 static Job *head_pick(int me, int take) {
     static int big_workers = -1;
@@ -3106,10 +3096,12 @@ static Job *head_pick(int me, int take) {
         big_workers = e ? atoi(e) : 1;
     }
     Job *pick = NULL, *pick_prev = NULL, *big = NULL, *big_prev = NULL;
-    for (Job *j = A.head, *prev = NULL; j; prev = j, j = j->next) {
-        if (!job_big(j)) { pick = j, pick_prev = prev; break; }
-        if (!big) big = j, big_prev = prev;
-    }
+    if (!vk_caps.amd) pick = A.head;
+    else
+        for (Job *j = A.head, *prev = NULL; j; prev = j, j = j->next) {
+            if (!j->big) { pick = j, pick_prev = prev; break; }
+            if (!big) big = j, big_prev = prev;
+        }
     if (!pick && big && me < big_workers) pick = big, pick_prev = big_prev;
     if (pick && take) {
         if (pick_prev) pick_prev->next = pick->next;
@@ -3375,12 +3367,13 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
     VkPipeline pipe = VK_NULL_HANDLE;
     Job *j = NULL;
     if (!why && mode && workers_start() && (j = calloc(1, sizeof *j))) {
+        uint64_t words = graphics_shader_words(s->vs) + graphics_shader_words(s->fs) + graphics_shader_words(s->gs) +
+                         graphics_shader_words(s->ts);
         int large = (mode == 1 || (mode == 2 && prewarm_big_bg)) && vk_caps.amd && !P.gpl && U.on && A.threads >= 3 &&
-                    graphics_shader_words(s->vs) + graphics_shader_words(s->fs) +
-                    graphics_shader_words(s->gs) + graphics_shader_words(s->ts) >= 60000;
+                    words >= 60000;
         *j = (Job){.l = l, .fs_off = fs_off, .low = mode == 2 || large, .prebuild = mode == 2,
                    .large = large, .probed = !probe_on || (getenv("OOT_PIPE_PROBE") && !strcmp(getenv("OOT_PIPE_PROBE"), "0")),
-                   .worker = -1, .s = *s, .k = *k};
+                   .big = vk_caps.amd && words >= big_cs_words(), .worker = -1, .s = *s, .k = *k};
     } else if (!why && !(pipe = create_graphics(s, k, l, fs_off, P.cache))) {
         why = "pipeline creation failed";
     }
@@ -3692,7 +3685,7 @@ void vk_pipeline_prewarm(void) {
             // held the boot for 15 minutes and ran the driver out of memory. OOT_PREWARM_BIG=1 builds them here.
             static int big = -1;
             if (big < 0) big = getenv("OOT_PREWARM_BIG") != NULL;
-            if (!big && graphics_shader_words(vs) + graphics_shader_words(fs) + graphics_shader_words(ts) >= big_cs_words()) {
+            if (!big && A.on && vk_caps.amd && graphics_shader_words(vs) + graphics_shader_words(fs) + graphics_shader_words(ts) >= big_cs_words()) {
                 if (dr) dr[deferred] = (struct DeferRec){i, vs, fs, ts};
                 deferred++;
                 continue;
@@ -3797,13 +3790,14 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
                                       .layout = l->layout};
     pin_subgroup32(&ci.stage, &rqc, code, words);
-    {   // LOCAL TEST (Ocarina): big guarded shaders were built without optimization (Lichii #273). On an RX 580 that is
-        // the slow path: the 166958-word forest shader takes 29 s and 1.1 GB optimized, minutes and 10+ GB without, and
-        // the unoptimized ones cost ~130 ms of GPU per frame. Optimized by default now; AMD retries without it if the
-        // driver refuses (below). OOT_BIG_CS_NOOPT=1 restores the old behaviour.
-        static int noopt = -1;
-        if (noopt < 0) noopt = getenv("OOT_BIG_CS_NOOPT") != NULL;
-        if (noopt && words >= big_cs_words()) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    {   // LOCAL TEST (Ocarina): a big guarded shader takes the driver minutes and over 30 GB: built without optimization, as Lichii #273 does for
+        // two shaders (they run slower). OOT_BIG_CS_OPT=1 keeps the optimizer.
+        // LOCAL TEST (Ocarina, AMD): on AMD's driver the unoptimized build is the slow path: on an RX 580 the 166958-word forest
+        // shader takes 29 s and 1.1 GB optimized, minutes and 10+ GB without, and the unoptimized ones cost ~130 ms of GPU per
+        // frame. AMD keeps the optimizer (and retries without it if the driver refuses, below); OOT_BIG_CS_NOOPT=1 turns it off there.
+        static int opt = -1;
+        if (opt < 0) opt = vk_caps.amd ? getenv("OOT_BIG_CS_NOOPT") == NULL : getenv("OOT_BIG_CS_OPT") != NULL;
+        if (!opt && words >= big_cs_words()) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
     }
     {   // LOCAL TEST (Ocarina): shaders that compare a lane with their thread index, or count lanes, need every subgroup full; NVIDIA
         // otherwise splits invocations differently from run to run, which made results differ from frame to frame.
@@ -3882,18 +3876,20 @@ static struct { const GfxShader *cs; volatile int done; } big_cs[BIG_CS_N];
 static volatile int big_cs_n;
 static int big_cs_thread;
 
-// LOCAL TEST (Ocarina): a private copy of the shared cache for one long compile. An empty cache never saw pipeline-cache.bin, so a big
-// shader built in an earlier run (or by --warm-big-cs) was compiled again for minutes whenever the driver's own disk cache had dropped it
-// (two RX 580 shaders of 132,314 and 139,072 words: 230 s and over 240 s, 13-15 GB, each time). The copy answers those, and a compile in it
-// still holds no lock of P.cache. Falls back to an empty cache.
+// LOCAL TEST (Ocarina): a copy of the shared cache, for --bench-cs with OOT_BENCH_SEED (play seeds its private caches with
+// cache_private). Falls back to an empty cache.
 static VkPipelineCache cache_copy(void) {
     VkPipelineCacheCreateInfo cci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     VkPipelineCache c = VK_NULL_HANDLE;
     size_t size = 0;
     void *data = NULL;
+    // Exclusive, as vk_pipeline_save takes it: vkGetPipelineCacheData while other threads build into the same cache crashed
+    // Intel's driver (#90).
+    plat_mutex_lock(&cache_access);
     if (P.cache && vkGetPipelineCacheData(P.device, P.cache, &size, NULL) == VK_SUCCESS && size && (data = malloc(size)) &&
         vkGetPipelineCacheData(P.device, P.cache, &size, data) == VK_SUCCESS)
         cci.initialDataSize = size, cci.pInitialData = data;
+    plat_mutex_unlock(&cache_access);
     if (vkCreatePipelineCache(P.device, &cci, NULL, &c) != VK_SUCCESS) {
         cci.initialDataSize = 0, cci.pInitialData = NULL;
         if (vkCreatePipelineCache(P.device, &cci, NULL, &c) != VK_SUCCESS) c = VK_NULL_HANDLE;
@@ -4028,20 +4024,19 @@ int vk_pipeline_bench_cs(void) {
 
 // LOCAL TEST (Ocarina): ocarina.exe --warm-big-cs builds, with no game, every recorded compute shader of big_cs_words() or more
 // into pipeline-cache.bin, one at a time, saving after each, so play never waits for them (big_cs_worker finds them through
-// cache_copy). On an RX 580 two of the forest's take about 4 minutes and 13-15 GB each the first time; afterwards well under a second.
-// The movie upscaler's shaders are left out (DKB_SKIP_CS skips their dispatches): this build only knows them by size, which
-// OOT_WARM_SKIP_WORDS overrides (comma-separated SPIR-V word counts of the game 1.1.1 with this translator).
+// cache_private). On an RX 580 two of the forest's take about 4 minutes and 13-15 GB each the first time; afterwards well under a second.
+// The shaders whose dispatches DKB_SKIP_CS skips are left out, matched by origin as the replay does.
 int vk_pipeline_warm_big_cs(void) {
     vk_pipeline_async_enable();
     if (!ensure_init()) {
         fprintf(stderr, "warm-big-cs: no Vulkan device\n");
         return 1;
     }
-    const char *se = getenv("OOT_WARM_SKIP_WORDS");
-    if (!se) se = "749526,405193,322000,5286642,4326240,1394116,7229120,185807,1027942,416247";
-    uint64_t skip[64];
+    const char *se = getenv("DKB_SKIP_CS");
+    if (!se) se = "dec1feb3c7fa967a,3f6f2b1d671badcd";   // main.c's default
+    uint64_t skip[32];
     int nskip = 0;
-    for (char *end; *se && nskip < 64; se = *end ? end + 1 : end) skip[nskip++] = strtoull(se, &end, 10);
+    for (char *end; *se && nskip < 32; se = *end ? end + 1 : end) skip[nskip++] = strtoull(se, &end, 16);
     GfxWarmEnt *all = NULL;
     size_t n = gfx_shader_warm_list(&all);
     const GfxShader **todo = calloc(n + 1, sizeof *todo);
@@ -4053,7 +4048,8 @@ int vk_pipeline_warm_big_cs(void) {
         uint64_t w = 0;
         if (!sh || !gfx_shader_spirv(sh, &w) || w < big_cs_words()) continue;
         int skipped = 0;
-        for (int k = 0; k < nskip; k++) skipped |= skip[k] == w;
+        uint64_t origin = nskip ? gfx_shader_input_origin(all[i].iid) : 0;
+        for (int k = 0; k < nskip; k++) skipped |= origin && skip[k] == origin;
         if (!skipped) todo[m] = sh, tw[m] = w, m++;
     }
     free(all);
