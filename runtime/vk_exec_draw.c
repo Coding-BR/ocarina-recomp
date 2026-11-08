@@ -3234,6 +3234,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         bind_index(ex, ix, sizeof *ix * 6 * q, VK_INDEX_TYPE_UINT32);
         free(ix);
         vkCmdDrawIndexed(ex->cb, 6 * q, inst, 0, 0, (uint32_t)d->base_instance);
+        { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0); }
     } else if (d->prim == NVN_DRAW_PRIMITIVE_LINE_LOOP && n >= 2) {   // a strip that returns to its first vertex
         uint32_t *ix = malloc(sizeof *ix * (n + 1));
         if (!ix) rt_fatal("vk: out of memory");
@@ -3242,8 +3243,10 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         bind_index(ex, ix, sizeof *ix * (n + 1), VK_INDEX_TYPE_UINT32);
         free(ix);
         vkCmdDrawIndexed(ex->cb, n + 1, inst, 0, 0, (uint32_t)d->base_instance);
+        { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0); }
     } else {
         vkCmdDraw(ex->cb, n, inst, first, (uint32_t)d->base_instance);
+        { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0); }
     }
     ex->recorded++;
     note_work(ex, 0, (uint64_t)n * inst);
@@ -3308,6 +3311,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     int ds_open = ds_begin(ex, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1);
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
+    { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0); }
     ex->recorded++;
     note_work(ex, 0, (uint64_t)d->count * (uint64_t)(d->instances > 0 ? d->instances : 1));
     if (ds_open) ds_end(ex);
@@ -3443,6 +3447,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     VK_MEM_USE(ib);
     vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+    { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0); }
     ex->recorded += 2;
     note_work(ex, 1, 0);
     // An imported pool's GPU address is its host address (bind_range reads it the same way); device memory is not.

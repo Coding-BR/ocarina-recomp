@@ -627,6 +627,7 @@ void vk_exec_pass_begin(VkExec *ex) {
 
 // LOCAL TEST (Ocarina): OOT_GPU_PROF=<present>: timestamps after every pass and dispatch and at the start of every command buffer
 // for six presents, then the cost per kind and the costliest. Run with TOTK_VK_RECORDER=0: vkCmdWriteTimestamp has no wrapper.
+// OOT_GPU_PROF_EVERY=<frames>: again every that many frames (one run covers the title, the forest and the Deku Tree).
 void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
     enum { PN = 16384 };
     static long at = -2;
@@ -635,6 +636,9 @@ void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
     static int n, done;
     if (at == -2) { const char *e = getenv("OOT_GPU_PROF"); at = e ? atol(e) : -1; }
     if (at < 0 || done || !ex->cb) return;
+    static int draws = -1;   // OOT_GPU_PROF_DRAWS=1: a timestamp after every draw too, by program serial
+    if (draws < 0) draws = getenv("OOT_GPU_PROF_DRAWS") != NULL;
+    if (!draws && kind[0] == 'd' && kind[1] == 'r') return;
     long f = (long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f < at) return;
     VkCtx *c = vk_ctx();
@@ -653,14 +657,18 @@ void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
     if (f < at + 14 || n < 2) return;
     done = 1;
     static uint64_t t[PN];
+    memset(t, 0, sizeof t);
     if (vkGetQueryPoolResults(c->device, pool, 0, (uint32_t)n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) < 0) { rt_log("gpu prof: no results"); return; }
     double per = c->props.limits.timestampPeriod / 1e6, total = (double)(t[n - 1] - t[0]) * per;
     struct { const char *k; uint64_t id; double ms; int calls; } a[512];
     int na = 0;
     double bykind[4] = {0};
-    const char *names[4] = {"pass", "dispatch", "gap before a command buffer", "other"};
+    double valid = 0;
+    const char *names[4] = {"pass", "dispatch", "gap before a command buffer", "draw"};
     for (int i = 1; i < n; i++) {
         double d = t[i] >= t[i - 1] ? (double)(t[i] - t[i - 1]) * per : 0;
+        if (!t[i] || !t[i - 1] || d > 1000.0) d = 0;   // a query left unwritten (a part never submitted)
+        valid += d;
         int k = !strcmp(m[i].kind, "pass") ? 0 : !strcmp(m[i].kind, "dispatch") ? 1 : !strcmp(m[i].kind, "part") ? 2 : 3;
         bykind[k] += d;
         int j = 0;
@@ -668,7 +676,8 @@ void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
         if (j == na && na < 512) a[na++].k = m[i].kind, a[j].id = m[i].id, a[j].ms = 0, a[j].calls = 0;
         if (j < 512) a[j].ms += d, a[j].calls++;
     }
-    rt_log("gpu prof: %d marks over 6 presents, span %.1f ms (%.1f per present)", n, total, total / 6);
+    (void)total;
+    rt_log("gpu prof: frame %ld: %d marks over 6 presents, %.1f ms timed (%.1f per present)", f, n, valid, valid / 6);
     for (int k = 0; k < 4; k++) rt_log("gpu prof: %s %.1f ms per present", names[k], bykind[k] / 6);
     for (int r = 0; r < 30; r++) {
         int best = -1;
@@ -676,6 +685,12 @@ void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
         if (best < 0) break;
         rt_log("gpu prof: %6.2f ms per present, %3d calls: %s %#llx", a[best].ms / 6, a[best].calls, a[best].k, (unsigned long long)a[best].id);
         a[best].calls = 0;
+    }
+    static long every = -2;
+    if (every == -2) { const char *e = getenv("OOT_GPU_PROF_EVERY"); every = e ? atol(e) : 0; }
+    if (every > 14) {   // every query was read above, so the pool can be reset from the host
+        vkResetQueryPool(c->device, pool, 0, PN);
+        n = 0, done = 0, at = f + every;
     }
 }
 
