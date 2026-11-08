@@ -2222,7 +2222,7 @@ static uint32_t vs_union_missing(const VkPipeState *s, GfxShaderIo fin[32]) {
     return missing;
 }
 
-// pipeline-crash.txt next to pipeline-keys.bin: the crash note of each graphics pipeline the driver crashed in
+// pipeline-crash.txt next to pipeline-keys.bin: the crash note of each graphics or compute pipeline the driver crashed in
 // (platform last-chance filter), a line per crash. An RX 6750 XT crashed in amdvlk64.dll building a mesh pipeline
 // early in play. Crashed once: built without optimization (a mesh pipeline: not built). Twice: not built, its draws
 // are skipped. Deleting the file tries them all again.
@@ -3805,7 +3805,26 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
         gfx_shader_local_size(cs, ls);
         if (ci.stage.pNext && ls[0] && ls[0] % vk_caps.sg_size == 0) ci.stage.flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
+    // A compute pipeline the driver crashed in (pipeline-crash.txt, as for graphics; NotRexed/Hookshot #758 saw an
+    // access violation in AMD's driver while compute pipelines were prepared at start) is built without optimization
+    // after one crash and skipped after a second, so a start that crashed does not crash again in the same place.
+    static _Thread_local char note[96];
+    uint64_t h = 1469598103934665603ull;   // FNV-1a of the SPIR-V, as for graphics
+    for (uint64_t j = 0; j < words; j++) h = (h ^ code[j]) * 1099511628211ull;
+    snprintf(note, sizeof note, "compute pipeline: cs %llu words %016llx", (unsigned long long)words, (unsigned long long)h);
+    int crashes = crash_count(note);
+    if (crashes >= 2) {
+        static volatile int32_t told;
+        if (plat_inc32(&told) <= 8) rt_log("vk_pipeline: not built, the driver crashed in it before: %s", note);
+        vkDestroyShaderModule(P.device, m, NULL);
+        return VK_NULL_HANDLE;
+    }
+    if (crashes) {
+        ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+        rt_log("vk_pipeline: built without optimization, the driver crashed in it before: %s", note);
+    }
     VkPipeline pipe = VK_NULL_HANDLE;
+    plat_crash_note(note);
     if (!cs_build_cache) plat_mutex_lock_shared(&cache_access);
     if (vkCreateComputePipelines(P.device, cs_build_cache ? cs_build_cache : P.cache, 1, &ci, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
     if (!pipe && vk_caps.amd && !(ci.flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT)) {   // as for graphics, above
@@ -3814,6 +3833,7 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
         rt_log("vk_pipeline: compute pipeline built again without optimization: %s", pipe ? "ok" : "failed too");
     }
     if (!cs_build_cache) plat_mutex_unlock_shared(&cache_access);
+    plat_crash_note(NULL);
     vkDestroyShaderModule(P.device, m, NULL);
     return pipe;
 }
