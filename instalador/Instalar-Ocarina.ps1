@@ -357,7 +357,13 @@ function P-Shaders() {
     $seed = Join-Path $script:pasta 'tools\data\oot-seed'
     $dir = Build 'oot111'
     if (-not (Test-Path (Join-Path $seed 'seed-answers.bin'))) { Registrar 'shaders: sem semente, passo pulado'; return }
-    if (Test-Path (Join-Path $dir 'shader-prepared.bin')) { return }
+    # Prepared again when the version or the translator changes: the lowering (runtime) and the translator make the
+    # shaders, so the earlier preparation no longer matches and the first start would build them in play again.
+    $marca = Join-Path $dir 'shader-prepared.txt'
+    $idx = Join-Path $script:pasta 'build\xlate\totk_xlate.id'
+    $chave = (Get-Content -LiteralPath (Join-Path $script:pasta 'VERSION') -Raw).Trim() + ' ' + $(if (Test-Path -LiteralPath $idx) { (Get-Content -LiteralPath $idx -Raw).Trim() } else { '' })
+    $feita = if (Test-Path -LiteralPath $marca) { (Get-Content -LiteralPath $marca -Raw).Trim() } else { '' }
+    if ((Test-Path (Join-Path $dir 'shader-prepared.bin')) -and $feita -eq $chave) { return }
     $pack = Build 'shader-stages.pack'
     $exe = Join-Path $dir 'ocarina.exe'
     try {
@@ -367,6 +373,7 @@ function P-Shaders() {
         # the player's own keys, from earlier play, are kept
         if (-not (Test-Path (Join-Path $dir 'pipeline-keys.bin'))) { Copy-Item -LiteralPath (Join-Path $seed 'pipeline-keys.bin') -Destination (Join-Path $dir 'pipeline-keys.bin') }
         Exec $exe @('--prepare-shaders') | Out-Null
+        Set-Content -LiteralPath $marca -Value $chave -Encoding ascii
     } catch {
         if ("$($_.Exception.Message)" -eq 'CANCELADO') { throw }
         Registrar "shaders: a preparação falhou, o jogo monta os shaders ao jogar: $($_.Exception.Message)"
