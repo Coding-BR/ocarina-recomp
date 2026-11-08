@@ -70,7 +70,6 @@ const uint8_t *gfx_shader_key(const GfxShader *s);          // the 32-byte cache
 const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte input id (stable across translators)
 // By input id from memory or disk; xlate 1 also translates it from its stored inputs. NULL if absent.
 const GfxShader *gfx_shader_load_input(const uint8_t iid[32], int xlate);
-uint64_t gfx_shader_input_origin(const uint8_t iid[32]);   // nvn2_origin of a stored input's code, 0 when not stored
 // Boot prewarm: out[i] = gfx_shader_load_input(iids[i], 1) on `threads` threads with up to `procs` translators, then
 // every other stored input not cached under this translator is translated. Logs progress and the total.
 void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **out, int threads, int procs);

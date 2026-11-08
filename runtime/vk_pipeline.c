@@ -4022,7 +4022,46 @@ int vk_pipeline_bench_cs(void) {
     return pipe ? 0 : 1;
 }
 
-// LOCAL TEST (Ocarina): ocarina.exe --warm-big-cs builds, with no game, every recorded compute shader of big_cs_words() or more
+// LOCAL TEST (Ocarina): big-compute.txt next to pipeline-cache.bin, a line "<input id> <origin>" for each compute shader of
+// big_cs_words() or more the replay met, before DKB_SKIP_CS. A stored input does not keep its origin (nvn2_origin knows this
+// process's lowered code only), so --warm-big-cs reads it here. The list also leaves out what play no longer meets: the shader
+// cache keeps the inputs of older lowerings, and on an RX 580 one of those (4.3 M words, HMMA inlined) took 22 minutes and
+// the next crashed the driver.
+static void big_met_path(char *out, size_t cap) {
+    snprintf(out, cap, "%s", P.cache_path);
+    char *slash = strrchr(out, '\\'), *fslash = strrchr(out, '/');
+    if (fslash > slash) slash = fslash;
+    snprintf(slash ? slash + 1 : out, cap - (size_t)(slash ? slash + 1 - out : 0), "big-compute.txt");
+}
+
+void vk_pipeline_big_cs_met(const GfxShader *cs, uint64_t origin) {   // the replay thread
+    static const GfxShader *met[256];
+    static int nmet, loaded;
+    static char *listed;   // the file as it was at the first call
+    uint64_t words = 0;
+    if (!cs || !gfx_shader_spirv(cs, &words) || words < big_cs_words()) return;
+    for (int i = 0; i < nmet; i++)
+        if (met[i] == cs) return;
+    if (nmet == (int)(sizeof met / sizeof *met) || !ensure_init() || !P.cache_path[0]) return;
+    met[nmet++] = cs;
+    char path[sizeof P.cache_path], line[64 + 1 + 16 + 2];
+    big_met_path(path, sizeof path);
+    if (!loaded) {
+        loaded = 1;
+        FILE *f = fopen(path, "rb");
+        size_t got = f && (listed = calloc(1, 1 << 16)) ? fread(listed, 1, (1 << 16) - 1, f) : 0;
+        (void)got;
+        if (f) fclose(f);
+    }
+    const uint8_t *id = gfx_shader_input_id(cs);
+    for (int i = 0; i < 32; i++) snprintf(line + 2 * i, 3, "%02x", id[i]);
+    if (listed && strstr(listed, line)) return;
+    snprintf(line + 64, sizeof line - 64, " %016llx\n", (unsigned long long)origin);
+    FILE *f = fopen(path, "ab");
+    if (f) fputs(line, f), fclose(f);
+}
+
+// LOCAL TEST (Ocarina): ocarina.exe --warm-big-cs builds, with no game, the big compute shaders play met (big-compute.txt)
 // into pipeline-cache.bin, one at a time, saving after each, so play never waits for them (big_cs_worker finds them through
 // cache_private). On an RX 580 two of the forest's take about 4 minutes and 13-15 GB each the first time; afterwards well under a second.
 // The shaders whose dispatches DKB_SKIP_CS skips are left out, matched by origin as the replay does.
@@ -4037,28 +4076,50 @@ int vk_pipeline_warm_big_cs(void) {
     uint64_t skip[32];
     int nskip = 0;
     for (char *end; *se && nskip < 32; se = *end ? end + 1 : end) skip[nskip++] = strtoull(se, &end, 16);
-    GfxWarmEnt *all = NULL;
-    size_t n = gfx_shader_warm_list(&all);
-    const GfxShader **todo = calloc(n + 1, sizeof *todo);
-    uint64_t *tw = calloc(n + 1, sizeof *tw);
-    size_t m = 0;
-    for (size_t i = 0; todo && tw && i < n; i++) {
-        if (all[i].stage != GFX_STAGE_CS) continue;
-        const GfxShader *sh = gfx_shader_load_input(all[i].iid, 0);
-        uint64_t w = 0;
-        if (!sh || !gfx_shader_spirv(sh, &w) || w < big_cs_words()) continue;
-        int skipped = 0;
-        uint64_t origin = nskip ? gfx_shader_input_origin(all[i].iid) : 0;
-        for (int k = 0; k < nskip; k++) skipped |= origin && skip[k] == origin;
-        if (!skipped) todo[m] = sh, tw[m] = w, m++;
+    char path[sizeof P.cache_path], line[256];
+    big_met_path(path, sizeof path);
+    FILE *f = P.cache_path[0] ? fopen(path, "rb") : NULL;
+    if (!f) {
+        printf("warm-big-cs: %s is missing: play once, until the scenes you want, then run this again\n", path);
+        return 1;
     }
-    free(all);
+    const GfxShader **todo = NULL;
+    uint64_t *tw = NULL;
+    size_t m = 0, cap = 0, left_out = 0, absent = 0;
+    while (fgets(line, sizeof line, f)) {
+        uint8_t iid[32];
+        unsigned v;
+        int ok = strlen(line) >= 81 && line[64] == ' ';
+        for (int i = 0; ok && i < 32; i++) ok = sscanf(line + 2 * i, "%2x", &v) == 1, iid[i] = (uint8_t)v;
+        if (!ok) continue;
+        uint64_t origin = strtoull(line + 65, NULL, 16);
+        int skipped = 0;
+        for (int k = 0; k < nskip; k++) skipped |= skip[k] == origin;
+        if (skipped) { left_out++; continue; }
+        const GfxShader *sh = gfx_shader_load_input(iid, 0);
+        uint64_t w = 0;
+        if (!sh || !gfx_shader_spirv(sh, &w)) { absent++; continue; }
+        int drop = w < big_cs_words();
+        for (size_t j = 0; j < m; j++) drop |= todo[j] == sh;
+        if (drop) continue;
+        if (m == cap) {
+            cap = cap ? cap * 2 : 64;
+            const GfxShader **nt = realloc(todo, cap * sizeof *todo);
+            uint64_t *nw = nt ? realloc(tw, cap * sizeof *tw) : NULL;
+            if (nt) todo = nt;
+            if (nw) tw = nw;
+            if (!nt || !nw) break;
+        }
+        todo[m] = sh, tw[m] = w, m++;
+    }
+    fclose(f);
     for (size_t i = 1; i < m; i++)   // smallest first: the quick ones are in the cache even if the run is stopped
         for (size_t j = i; j > 0 && tw[j] < tw[j - 1]; j--) {
             uint64_t t = tw[j]; tw[j] = tw[j - 1], tw[j - 1] = t;
             const GfxShader *s = todo[j]; todo[j] = todo[j - 1], todo[j - 1] = s;
         }
-    printf("warm-big-cs: %zu big compute shaders to build, one at a time (closing this window stops it; what is done stays)\n", m);
+    printf("warm-big-cs: %zu big compute shaders to build, one at a time (closing this window stops it; what is done stays); %zu "
+           "left out by DKB_SKIP_CS, %zu not translated by this translator yet (play does it)\n", m, left_out, absent);
     fflush(stdout);
     uint64_t t_all = plat_now_ns();
     int failed = 0;
