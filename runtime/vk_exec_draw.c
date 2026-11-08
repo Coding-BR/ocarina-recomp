@@ -19,6 +19,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -707,6 +708,7 @@ void vk_exec_image_gone(VkImage image) {
 typedef struct { uint64_t serial; int stage; int used; GfxShaderAnswers a; const GfxShader *s; } ShaderEnt;
 static ShaderEnt shader_tab[SHADER_SETS][SHADER_WAYS];
 
+static void oot_tonemap_exposure(VkExec *ex, VkDescriptorBufferInfo *bi);
 static int find_stage_scan(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
     for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
         const uint8_t *c = p->sd[i].control;
@@ -1285,11 +1287,43 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
         const p_bind_buf *b = &ex->ubo[st][slot - 3];
         if (b->size && vk_usnap_find(b->addr, b->size < max ? b->size : max, align, &bi)) {   // as of the submit call
             count_use(VK_MCLS_SCRATCH, VK_MUSE_UBO, bi.range);
+            if (st == NVN_STAGE_FS && slot == 3 && ex->prog) oot_tonemap_exposure(ex, &bi);
             return bi;
         }
         if (bind_range(ex, b->addr, b->size, align, max, VK_MUSE_UBO, 0, 0, &bi)) return bi;
     }
     return zero_info(max);
+}
+
+// LOCAL TEST (Ocarina 1.1.1): the tone map (fragment nvn2 73320e720a317817) scales its bloom by c3[3].z =
+// exp2f(EV), the views' exposure (main+0x28c80c reads it from [view+0x1c8]+0x128). Nothing here writes that EV, so it
+// stays at its constructor's 0 and the picture comes out washed white; Lichii, running the same guest code, shows the
+// console's darker look, so its writer depends on something the port does not provide yet. With the EV forced to
+// -1.25 the picture matches Lichii at the same spot and the reference video (frame luma 0.37 -> 0.21 at a fixed
+// camera; the passes before the tone map do not change). The scale is set here, in the uniform snapshot, while the
+// game's is 1 (EV 0): reading the guest's view objects every present stalled on the GPU and halved the frame rate.
+// OOT_EV (main.c game_defaults: -1.25); OOT_EV=0 keeps the old picture.
+static void oot_tonemap_exposure(VkExec *ex, VkDescriptorBufferInfo *bi) {
+    static float scale = -1;
+    static const void *last_prog;
+    static int last_hit;
+    if (scale < 0) {
+        const char *e = getenv("OOT_EV");
+        scale = e && atof(e) != 0 ? exp2f((float)atof(e)) : 0;
+    }
+    if (!scale) return;
+    if (ex->prog != last_prog) {   // the same program is bound for many draws: look its fragment stage up once
+        const uint8_t *tctl, *tcode;
+        uint32_t tlen;
+        last_prog = ex->prog;
+        last_hit = find_stage(ex->prog, NVN_STAGE_FS, &tctl, &tcode, &tlen) && nvn2_origin(tcode) == 0x73320e720a317817ull;
+    }
+    if (!last_hit || bi->range < 64) return;
+    uint8_t *m = vk_usnap_map(bi);
+    float z;
+    if (!m) return;
+    memcpy(&z, m + 56, 4);
+    if (z == 1.0f) memcpy(m + 56, &scale, 4);
 }
 
 // The NVN slot of a storage binding. Ryujinx numbers a shader's storage buffers in the order it meets them
