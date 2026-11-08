@@ -15,9 +15,11 @@
 // passes over the crop. The made frames of a set are read by their presents; the next frame writes the other set.
 #include "vk.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "cfg.h"
+#include "fg_camflow_spv.h"
 #include "fg_copy_spv.h"
 #include "fg_flow_spv.h"
 #include "fg_luma_spv.h"
@@ -36,7 +38,9 @@ typedef struct { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkPipeline 
 static struct {
     int tried, ok;
     PFN_vkCmdPushDescriptorSetKHR push;
-    Pass copy, luma, flow, median, synth;
+    Pass copy, luma, flow, median, synth, camflow;
+    OotMotionFrame prev_cam;   // the camera of the last frame interpolated from
+    int have_cam;
     VkSampler nearest, linear;
     VkCommandPool pool;
     VkCommandBuffer cb[2];
@@ -46,6 +50,10 @@ static struct {
     int mult, cur, have_prev, set;
     uint64_t last_ns;
     VkImageView src_view[2];
+    VkBuffer rb;   // OOT_FG_LOG: a readback of the vectors
+    VmaAllocation rb_alloc;
+    void *rb_map;
+    int rb_pending, rb_n;
     VkFormat src_fmt;
 } G;
 
@@ -107,6 +115,7 @@ static int init(VkCtx *c) {
         !make_pass(c, &G.flow, fg_flow_spv, sizeof fg_flow_spv, (VkDescriptorType[]){S, S, I}, 3, 0, &spec) ||
         !make_pass(c, &G.median, fg_median_spv, sizeof fg_median_spv, (VkDescriptorType[]){S, I}, 2, 0, NULL) ||
         !make_pass(c, &G.synth, fg_synth_spv, sizeof fg_synth_spv, (VkDescriptorType[]){S, S, S, I}, 4, 4, NULL) ||
+        !make_pass(c, &G.camflow, fg_camflow_spv, sizeof fg_camflow_spv, (VkDescriptorType[]){S, S, S, S, I}, 5, 80, NULL) ||
         vkCreateSampler(c->device, &si, NULL, &G.nearest) != VK_SUCCESS ||
         vkCreateSampler(c->device, &sl, NULL, &G.linear) != VK_SUCCESS ||
         vkCreateCommandPool(c->device, &pci, NULL, &G.pool) != VK_SUCCESS) {
@@ -200,8 +209,8 @@ static int ensure_images(VkCtx *c, VkCommandBuffer cb, uint32_t w, uint32_t h, i
 
 static void pass(VkCommandBuffer cb, const Pass *p, const VkImageView *views, const VkSampler *samplers, int n, uint32_t w,
                  uint32_t h, const void *push, uint32_t push_bytes) {
-    VkDescriptorImageInfo ii[4];
-    VkWriteDescriptorSet ws[4];
+    VkDescriptorImageInfo ii[5];
+    VkWriteDescriptorSet ws[5];
     for (int i = 0; i < n; i++) {
         ii[i] = (VkDescriptorImageInfo){samplers[i], views[i], VK_IMAGE_LAYOUT_GENERAL};
         ws[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)i,
@@ -217,7 +226,20 @@ static void pass(VkCommandBuffer cb, const Pass *p, const VkImageView *views, co
     barrier_all(cb);
 }
 
-int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4], VkImage out[], int *ow, int *oh) {
+// The rows of last view * inverse(this view) (views are rigid: inverse = [R^T | -R^T t]).
+static void cam_delta(const float *last, const float *cur, float m[12]) {
+    float ri[3][3], ti[3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) ri[i][j] = cur[j * 4 + i];
+    for (int i = 0; i < 3; i++) ti[i] = -(ri[i][0] * cur[3] + ri[i][1] * cur[7] + ri[i][2] * cur[11]);
+    for (int r = 0; r < 3; r++) {
+        for (int j = 0; j < 3; j++) m[r * 4 + j] = last[r * 4] * ri[0][j] + last[r * 4 + 1] * ri[1][j] + last[r * 4 + 2] * ri[2][j];
+        m[r * 4 + 3] = last[r * 4] * ti[0] + last[r * 4 + 1] * ti[1] + last[r * 4 + 2] * ti[2] + last[r * 4 + 3];
+    }
+}
+
+int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4], const OotMotionFrame *mo, VkImage out[],
+                     int *ow, int *oh) {
     int mult = vk_framegen_mult();
     if (mult < 2 || !src || !fmt) return G.have_prev = 0, 0;
     VkCtx *c = vk_ctx();
@@ -233,6 +255,30 @@ int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4
     int s = G.set;
     G.set ^= 1;
     vkWaitForFences(c->device, 1, &G.fence[s], VK_TRUE, 5000000000ull);   // this command buffer's last use is done
+    if (G.rb_pending == s + 1) {   // OOT_FG_LOG: that readback is complete
+        G.rb_pending = 0;
+        vmaInvalidateAllocation(c->vma, G.rb_alloc, 0, VK_WHOLE_SIZE);
+        const uint16_t *hv = G.rb_map;
+        int camn = 0;
+        double sc = 0, mag = 0;
+        for (int i = 0; i < G.rb_n; i++) {
+            uint16_t w4 = hv[4 * i + 3];
+            if (w4 == 0x4000) {   // 2.0 in half
+                camn++;
+                uint16_t z = hv[4 * i + 2];
+                int e = z >> 10 & 31, mm = z & 1023;
+                sc += e ? ldexp((double)(mm | 1024), e - 25) : ldexp((double)mm, -24);
+                for (int q = 0; q < 2; q++) {
+                    uint16_t x = hv[4 * i + q];
+                    int ex = x >> 10 & 31, mx = x & 1023;
+                    double f = ex ? ldexp((double)(mx | 1024), ex - 25) : ldexp((double)mx, -24);
+                    mag += f;
+                }
+            }
+        }
+        rt_log("vk: frame interpolation: %d of %d blocks took the camera's vector (mean cost %.4f, mean |v| %.1f px)", camn,
+               G.rb_n, camn ? sc / camn : 0.0, camn ? mag / camn : 0.0);
+    }
     VkCommandBuffer cb = G.cb[s];
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -263,9 +309,41 @@ int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4
              (VkSampler[]){G.nearest, G.nearest, VK_NULL_HANDLE}, 3, cw, ch, NULL, 0);
         pass(cb, &G.median, (VkImageView[]){G.flowv[0].view, G.flowv[1].view}, (VkSampler[]){G.nearest, VK_NULL_HANDLE}, 2,
              cw, ch, NULL, 0);
+        int fl = 1;   // the vectors the synthesis reads: the median's, or the camera's checked against them
+        static int cam_on = -1;
+        if (cam_on < 0) { const char *e = getenv("OOT_FG_CAMERA"); cam_on = !(e && *e == '0'); }
+        if (cam_on && mo && G.have_cam && mo->depth) {
+            struct { float m[12], proj[4], size[4]; } pk;
+            cam_delta(G.prev_cam.view, mo->view, pk.m);
+            pk.proj[0] = mo->p00, pk.proj[1] = mo->p11, pk.proj[2] = mo->lin_y, pk.proj[3] = mo->lin_x;
+            pk.size[0] = (float)uw, pk.size[1] = (float)uh, pk.size[2] = mo->near_, pk.size[3] = 0;
+            pass(cb, &G.camflow, (VkImageView[]){G.luma_img[prev].view, G.luma_img[cur].view, G.flowv[1].view, mo->depth,
+                                                 G.flowv[0].view},
+                 (VkSampler[]){G.nearest, G.nearest, G.nearest, G.linear, VK_NULL_HANDLE}, 5, cw, ch, &pk, sizeof pk);
+            fl = 0;
+            static int log_on = -1;
+            static uint32_t nframes;
+            if (log_on < 0) log_on = getenv("OOT_FG_LOG") != NULL;
+            if (log_on && ++nframes % 120 == 0 && !G.rb_pending) {
+                if (!G.rb) {
+                    VkBufferCreateInfo bi2 = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 8ull * 512 * 512,
+                                              .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+                    VmaAllocationCreateInfo ai2 = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+                    VmaAllocationInfo inf;
+                    if (vmaCreateBuffer(c->vma, &bi2, &ai2, &G.rb, &G.rb_alloc, &inf) == VK_SUCCESS) G.rb_map = inf.pMappedData;
+                }
+                if (G.rb_map && cw * ch <= 512 * 512) {
+                    VkBufferImageCopy rg = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {cw, ch, 1}};
+                    vkCmdCopyImageToBuffer(cb, G.flowv[0].image, VK_IMAGE_LAYOUT_GENERAL, G.rb, 1, &rg);
+                    barrier_all(cb);
+                    G.rb_pending = s + 1, G.rb_n = (int)(cw * ch);
+                }
+            }
+        }
         for (int k = 1; k < mult; k++) {
             float t = (float)k / (float)mult;
-            pass(cb, &G.synth, (VkImageView[]){G.frame[prev].view, G.frame[cur].view, G.flowv[1].view, G.made[s][k - 1].view},
+            pass(cb, &G.synth, (VkImageView[]){G.frame[prev].view, G.frame[cur].view, G.flowv[fl].view, G.made[s][k - 1].view},
                  (VkSampler[]){G.linear, G.linear, G.nearest, VK_NULL_HANDLE}, 4, uw, uh, &t, 4);
             out[made++] = G.made[s][k - 1].image;
         }
@@ -284,6 +362,8 @@ int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4
     }
     G.have_prev = 1;
     G.cur = prev;
+    if (mo) G.prev_cam = *mo, G.have_cam = 1;
+    else G.have_cam = 0;
     *ow = w, *oh = h;
     return made;
 }
@@ -296,8 +376,8 @@ void vk_framegen_release(void) {
     free_images(c);
     for (int k = 0; k < 2; k++)
         if (G.src_view[k]) vkDestroyImageView(c->device, G.src_view[k], NULL);
-    Pass *ps[] = {&G.copy, &G.luma, &G.flow, &G.median, &G.synth};
-    for (int i = 0; i < 5; i++) {
+    Pass *ps[] = {&G.copy, &G.luma, &G.flow, &G.median, &G.synth, &G.camflow};
+    for (int i = 0; i < 6; i++) {
         if (ps[i]->pipe) vkDestroyPipeline(c->device, ps[i]->pipe, NULL);
         if (ps[i]->layout) vkDestroyPipelineLayout(c->device, ps[i]->layout, NULL);
         if (ps[i]->dsl) vkDestroyDescriptorSetLayout(c->device, ps[i]->dsl, NULL);

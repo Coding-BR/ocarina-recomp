@@ -33,7 +33,7 @@
 
 #define WEAK __attribute__((weak))
 
-typedef struct { VkImage image; VkFormat format; int w, h, has_crop, crop[4]; uint64_t frame, at, queued, value; } PresentJob;
+typedef struct { VkImage image; VkFormat format; int w, h, has_crop, crop[4]; uint64_t frame, at, queued, value; int has_mo; OotMotionFrame mo; } PresentJob;
 
 static PlatMutex pl = PLAT_MUTEX_INIT;
 static PlatCond pcv = PLAT_COND_INIT;   // job queued, job taken, job submitted
@@ -80,7 +80,8 @@ static void present_main(void *arg) {
         {   // Frame interpolation (vk_framegen.c, TOTK_FRAMEGEN): the made frames between the last game frame and this one
             // go out first, evenly over the recent interval between the game's frames, each flipped when it is due
             VkImage made[4];
-            int fw = 0, fh = 0, n = vk_framegen_make(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, made, &fw, &fh);
+            int fw = 0, fh = 0, n = vk_framegen_make(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, j.has_mo ? &j.mo : NULL,
+                                                     made, &fw, &fh);
             static uint64_t interval = 16666667, fg_shown, fg_made, fg_frames;
             if (last && j.at > last) {
                 uint64_t d = j.at - last;
@@ -158,6 +159,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     }
     PresentJob j = {.image = img->image, .format = img->format, .w = (int)img->width, .h = (int)img->height, .frame = frame,
                     .at = at_ns, .queued = queued, .value = value};
+    j.has_mo = oot_motion_take(&j.mo);
     if (crop) {
         j.has_crop = 1;
         for (int i = 0; i < 4; i++) j.crop[i] = crop[i];
