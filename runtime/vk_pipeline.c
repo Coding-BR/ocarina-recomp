@@ -2463,6 +2463,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             if (c) at += snprintf(note + at, sizeof note - at, " %s %llu words %016llx", (const char *[]){"ts", "vs", "gs", "fs"}[i],
                                   (unsigned long long)w, (unsigned long long)h);
         }
+    }
     int crashes = crash_count(note);
     if (crashes >= 2) {
         static volatile int32_t told;
@@ -2472,7 +2473,6 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     if (crashes) {
         pi.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
         rt_log("vk_pipeline: built without optimization, the driver crashed in it before: %s", note);
-    }
     }
     uint64_t gwords = 0;
     {   // LOCAL TEST (Ocarina): OOT_BIG_GFX_NOOPT=1 builds a guarded graphics pipeline (vertex + fragment of big_cs_words()
@@ -3263,12 +3263,10 @@ static int workers_start(void) {
     if (A.threads) return 1;
     uint32_t cpus = plat_cpu_usable();
     int n = cpus / 4 < 2 ? 2 : cpus / 4 > MAX_WORKERS ? MAX_WORKERS : (int)(cpus / 4);
-    {   // LOCAL TEST (Ocarina, AMD): a guarded graphics pipeline takes 10+ GB of driver memory for minutes on AMD;
-        // three at once beside the big compute worker paged a 16 GB machine to 50+ GB. OOT_PIPE_WORKERS overrides.
-        const VkCtx *ctx = vk_ctx();
+    {   // LOCAL TEST (Ocarina, AMD): OOT_PIPE_WORKERS overrides the count. On AMD the big jobs are serialized on worker 0
+        // (head_pick), so the default count stays.
         const char *e = getenv("OOT_PIPE_WORKERS");
         if (e && *e) n = atoi(e);
-        (void)ctx;   // AMD: big jobs are serialized on worker 0 (head_pick), so the default count stays
         n = n < 1 ? 1 : n > MAX_WORKERS ? MAX_WORKERS : n;
     }
     for (int i = 0; i < n; i++) {
@@ -4071,8 +4069,8 @@ int vk_pipeline_warm_big_cs(void) {
         fprintf(stderr, "warm-big-cs: no Vulkan device\n");
         return 1;
     }
-    const char *se = getenv("DKB_SKIP_CS");
-    if (!se) se = "dec1feb3c7fa967a,3f6f2b1d671badcd";   // main.c's default
+    const char *se = getenv("DKB_SKIP_CS");   // main.c's game_defaults sets the default before the mode runs
+    if (!se) se = "";
     uint64_t skip[32];
     int nskip = 0;
     for (char *end; *se && nskip < 32; se = *end ? end + 1 : end) skip[nskip++] = strtoull(se, &end, 16);
