@@ -42,7 +42,10 @@ static struct {
 // LOCAL TEST: OOT_SCENE_TAA=1, the scene's temporal anti-aliasing (vk_exec_draw.c), also needs the camera and depth.
 int oot_motion_scene_taa(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("OOT_SCENE_TAA"); on = e && *e == '1'; }
+    if (on < 0) {   // OOT_SCENE_FSR2=1 (vk_exec_draw.c scene_fsr2) needs them too
+        const char *e = getenv("OOT_SCENE_TAA"), *f = getenv("OOT_SCENE_FSR2");
+        on = (e && *e == '1') || (f && *f == '1');
+    }
     return on;
 }
 
