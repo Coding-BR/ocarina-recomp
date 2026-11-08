@@ -241,6 +241,15 @@ static void vk_down(void) {
     g_font_scale = 0;
 }
 
+// The back end reports every Vulkan result here. A failed allocation skips the overlay for a frame instead of ending the
+// game (imgui_impl_vulkan.cpp), and this line says that it happened.
+// Tested: docs/test-environment-rx5500xt.md.
+static void menu_vk_check(VkResult r) {
+    static std::atomic<int> told;
+    if (r != VK_SUCCESS && told.fetch_add(1, std::memory_order_relaxed) < 16)
+        rt_log("menu: a Vulkan call of the overlay failed (%d): its frame is skipped", (int)r);
+}
+
 static int vk_up(const MenuTarget *t) {
     if (g_vk_ok && g_vk_fmt == t->format) return 1;
     if (g_vk_ok) {   // the swapchain changed format: pipelines for the new one
@@ -260,6 +269,10 @@ static int vk_up(const MenuTarget *t) {
     ii.MinImageCount = 2;
     ii.ImageCount = 4;   // vertex buffers rotate per recorded frame: more than gfx_present.c's 2 frames in flight
     ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    ii.CheckVkResultFn = menu_vk_check;
+    // Room for the whole menu from the first overlay frame, while memory is free: opening it deep into a scene that has
+    // filled the GPU memory then needs no new buffer (2 MiB of vertices is several times what the menu draws).
+    ii.MinAllocationSize = 2u << 20;
     ii.UseDynamicRendering = true;
     g_vk_fmt = t->format;
     ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
