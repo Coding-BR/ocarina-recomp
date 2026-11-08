@@ -7,6 +7,7 @@
 // its camera. A ring of three: the present thread is at most a frame behind the replay.
 #include "vk.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "fg_depth_spv.h"
@@ -34,7 +35,16 @@ static struct {
     const VkTexImage *pend_depth;
     OotMotionFrame pend;
     volatile int latest;   // ring slot of the newest copy, -1 none; taken by the present
-} M = {.latest = -1};
+    int written;           // ring slot of the newest copy, for the scene's temporal pass (replay thread)
+    uint64_t seq;          // copies made
+} M = {.latest = -1, .written = -1};
+
+// LOCAL TEST: OOT_SCENE_TAA=1, the scene's temporal anti-aliasing (vk_exec_draw.c), also needs the camera and depth.
+int oot_motion_scene_taa(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("OOT_SCENE_TAA"); on = e && *e == '1'; }
+    return on;
+}
 
 static int init(VkCtx *c) {
     M.tried = 1;
@@ -107,7 +117,7 @@ static int ensure(VkCtx *c, VkCommandBuffer cb, uint32_t w, uint32_t h) {
 
 // prepare_draw of the probe's draw (vk_exec_draw.c): its camera from the uniform snapshot, its depth texture.
 void oot_motion_note(VkExec *ex) {
-    if (vk_framegen_mult() < 2) return;
+    if (vk_framegen_mult() < 2 && !oot_motion_scene_taa()) return;
     const p_bind_buf *b = &ex->ubo[NVN_STAGE_VS][0];   // c3
     VkDescriptorBufferInfo bi;
     const float *c3;
@@ -154,7 +164,16 @@ void oot_motion_pass_end(VkExec *ex) {
     M.cam[s] = M.pend;
     M.cam[s].depth = M.view[s];
     M.cam[s].w = M.w, M.cam[s].h = M.h;
+    M.written = s, M.seq++;
     __atomic_store_n(&M.latest, s, __ATOMIC_RELEASE);
+}
+
+// The scene's temporal pass, on the replay thread: this frame's copy (seq: which one; 0 when none yet).
+int oot_motion_peek(OotMotionFrame *out, uint64_t *seq) {
+    if (M.written < 0) return 0;
+    *out = M.cam[M.written];
+    *seq = M.seq;
+    return 1;
 }
 
 // vk_be_present: the newest copy and its camera, once (0: none since the last present).
@@ -164,3 +183,16 @@ int oot_motion_take(OotMotionFrame *out) {
     *out = M.cam[s];
     return 1;
 }
+
+// The rows of last view * inverse(this view) (views are rigid: inverse = [R^T | -R^T t]).
+void oot_motion_delta(const float *last, const float *cur, float m[12]) {
+    float ri[3][3], ti[3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) ri[i][j] = cur[j * 4 + i];
+    for (int i = 0; i < 3; i++) ti[i] = -(ri[i][0] * cur[3] + ri[i][1] * cur[7] + ri[i][2] * cur[11]);
+    for (int r = 0; r < 3; r++) {
+        for (int j = 0; j < 3; j++) m[r * 4 + j] = last[r * 4] * ri[0][j] + last[r * 4 + 1] * ri[1][j] + last[r * 4 + 2] * ri[2][j];
+        m[r * 4 + 3] = last[r * 4] * ti[0] + last[r * 4 + 1] * ti[1] + last[r * 4 + 2] * ti[2] + last[r * 4 + 3];
+    }
+}
+

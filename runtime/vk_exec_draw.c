@@ -24,6 +24,7 @@
 #include "tex.h"
 #include "oot_scene_spv.h"
 #include "oot_scene_easu_spv.h"
+#include "oot_taa_spv.h"
 #include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -3648,6 +3649,110 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
 
 // ---- dispatch and uniform buffer updates
 
+// LOCAL TEST (Ocarina, OOT_SCENE_TAA=1): temporal anti-aliasing of the scene (oot_taa.comp) before the stand-in
+// upscale, with this frame's depth and camera from oot_motion.c. The result (RGBA16F, the same square-root space) is
+// what the upscale reads; VK_NULL_HANDLE: no pass (no camera yet, or a setup failure), the upscale reads src.
+static VkImageView scene_taa(VkExec *ex, VkImageView src, uint32_t w, uint32_t h) {
+    static int ok = -1;
+    static VkPipeline pipe;
+    static VkPipelineLayout layout;
+    static VkSampler nearest, linear;
+    static PFN_vkCmdPushDescriptorSetKHR push;
+    static VkImage img[2];
+    static VmaAllocation mem[2];
+    static VkImageView view[2];
+    static uint32_t iw, ih;
+    static int cur, have;
+    static uint64_t last_seq;
+    static OotMotionFrame last;
+    if (!oot_motion_scene_taa()) return VK_NULL_HANDLE;
+    VkCtx *c = vk_ctx();
+    if (ok < 0) {
+        ok = 0;
+        push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+        VkDescriptorSetLayoutBinding b[4];
+        for (int i = 0; i < 4; i++)
+            b[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                  .descriptorType = i < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+        VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                               .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 4, .pBindings = b};
+        VkDescriptorSetLayout dsl;
+        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 96};
+        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+        VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                  .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+        VkSamplerCreateInfo sl = si;
+        sl.magFilter = sl.minFilter = VK_FILTER_LINEAR;
+        VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof oot_taa_spv, .pCode = oot_taa_spv};
+        VkShaderModule m;
+        if (!push || vkCreateDescriptorSetLayout(c->device, &dci, NULL, &dsl) != VK_SUCCESS ||
+            vkCreatePipelineLayout(c->device, &li, NULL, &layout) != VK_SUCCESS || vkCreateSampler(c->device, &si, NULL, &nearest) != VK_SUCCESS ||
+            vkCreateSampler(c->device, &sl, NULL, &linear) != VK_SUCCESS || vkCreateShaderModule(c->device, &mi, NULL, &m) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+        VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                          .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                    .module = m, .pName = "main"},
+                                          .layout = layout};
+        VkResult r = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &pipe);
+        vkDestroyShaderModule(c->device, m, NULL);
+        if (r != VK_SUCCESS) return VK_NULL_HANDLE;
+        ok = 1;
+        rt_log("vk: the scene's temporal anti-aliasing is on (OOT_SCENE_TAA)");
+    }
+    if (!ok) return VK_NULL_HANDLE;
+    OotMotionFrame mo;
+    uint64_t seq = 0;
+    if (!oot_motion_peek(&mo, &seq) || !mo.depth || mo.w != w || mo.h != h) return have = 0, VK_NULL_HANDLE;
+    if (iw != w || ih != h) {   // ponytail: images of an earlier size are left allocated; the scene size rarely changes
+        for (int i = 0; i < 2; i++) {
+            VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                                    .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                    .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+            if (vmaCreateImage(c->vma, &ci, &ai, &img[i], &mem[i], NULL) != VK_SUCCESS) return ok = 0, VK_NULL_HANDLE;
+            VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                        .format = VK_FORMAT_R16G16B16A16_SFLOAT, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            if (vkCreateImageView(c->device, &vi, NULL, &view[i]) != VK_SUCCESS) return ok = 0, VK_NULL_HANDLE;
+            VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .image = img[i],
+                                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
+            vkCmdPipelineBarrier2(ex->cb, &di);
+        }
+        iw = w, ih = h, have = 0;
+    }
+    // the history is this frame's predecessor only when the copy before this one was the last frame's
+    int first = !have || seq != last_seq + 1;
+    struct { float m[12], proj[4], size[4], misc[4]; } pk = {0};
+    if (!first) oot_motion_delta(last.view, mo.view, pk.m);
+    pk.proj[0] = mo.p00, pk.proj[1] = mo.p11, pk.proj[2] = mo.lin_y, pk.proj[3] = mo.lin_x;
+    pk.size[0] = (float)w, pk.size[1] = (float)h, pk.size[2] = mo.near_, pk.size[3] = first ? 1.0f : 0.0f;
+    static float weight = -1;
+    if (weight < 0) { const char *e = getenv("OOT_SCENE_TAA_WEIGHT"); weight = e ? (float)atof(e) : 0.12f; }
+    pk.misc[0] = weight;
+    int out = cur ^ 1;
+    VkDescriptorImageInfo ii[4] = {{nearest, src, VK_IMAGE_LAYOUT_GENERAL}, {nearest, mo.depth, VK_IMAGE_LAYOUT_GENERAL},
+                                   {linear, view[cur], VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, view[out], VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wds[4];
+    for (int i = 0; i < 4; i++)
+        wds[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)i, .descriptorCount = 1,
+                                        .descriptorType = i < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                        .pImageInfo = &ii[i]};
+    vk_exec_barrier(ex);
+    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    rec_push(push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 4, wds);
+    vkCmdPushConstants(ex->cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pk, &pk);
+    vkCmdDispatch(ex->cb, (w + 7) / 8, (h + 7) / 8, 1);
+    B.pipe[1] = VK_NULL_HANDLE;
+    ex->recorded++;
+    vk_exec_barrier(ex);
+    cur = out, have = 1, last = mo, last_seq = seq;
+    return view[out];
+}
+
 // LOCAL TEST (Ocarina): the game's upscaler lowers to 1.4 million SPIR-V words with about a thousand gathers, and running it
 // lost the device on an RTX 5090 (an invalid instruction pointer, the same address in every run). Such a giant is replaced
 // (this NVN 2 stage only) by a blit from its largest sampled texture to the image it writes. 1 when it was. ponytail: bilinear, not the game's
@@ -3785,7 +3890,8 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
         rt_log("vk: the game's upscaler is stood in for by %s", easu ? "FSR 1 EASU" : "a bilinear sample");
     }
     VkImageView dv = vk_exec_target_view(dst, dst->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1, 0);
-    VkDescriptorImageInfo ii[2] = {{samp, e5_view, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, dv, VK_IMAGE_LAYOUT_GENERAL}};
+    VkImageView taa = scene_taa(ex, e5_view, src->width, src->height);
+    VkDescriptorImageInfo ii[2] = {{samp, taa ? taa : e5_view, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, dv, VK_IMAGE_LAYOUT_GENERAL}};
     VkWriteDescriptorSet w[2] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[1]}};
