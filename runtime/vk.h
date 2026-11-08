@@ -23,6 +23,11 @@ typedef struct VkCtx {
     uint32_t gfx_family;                    // graphics + compute + presentation on win32
     uint32_t xfer_family;                   // a transfer-only family when the GPU has one, else gfx_family
     VkQueue gfx_queue;                      // graphics + present
+    // A second queue of gfx_family only for vkQueuePresentKHR, synchronised by the present lock (gfx_present.c g_pl)
+    // instead of vk_queue_lock: AMD's Windows driver can block inside the present while presents are queued ahead of
+    // the display, and with the queue lock held there the game's next submission waited forever (frozen picture).
+    // Only on that driver unless TOTK_PRESENT_QUEUE=1; equals gfx_queue otherwise, and when the family has one queue.
+    VkQueue present_queue;
     VkQueue xfer_queue;                     // equals gfx_queue when xfer_shared
     int xfer_shared;                        // 1: no separate queue; serialise with gfx_queue
     VmaAllocator vma;
