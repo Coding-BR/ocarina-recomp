@@ -589,6 +589,8 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--prepare-shaders")) return vk_pipeline_prepare_shaders();
     if (!strcmp(mode, "--lower-stages")) return gfx_shader_lower_stages(lower_pack, lower_dir);
     if (!strcmp(mode, "--warm-shaders")) return vk_pipeline_warm_shaders();
+    if (!strcmp(mode, "--bench-cs")) return vk_pipeline_bench_cs();
+    if (!strcmp(mode, "--warm-big-cs")) return vk_pipeline_warm_big_cs();
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
 }
