@@ -12,6 +12,7 @@
 #include "platform/platform.h"
 
 static VkCtx g_vk;
+static uint32_t g_gfx_queues = 1;   // queueCount of gfx_family (a second one becomes present_queue)
 static int g_ready;
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
 
@@ -175,6 +176,7 @@ static int pick_device(void) {
     VkQueueFamilyProperties *qp = calloc(nq ? nq : 1, sizeof *qp);
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
     g_vk.gfx_family = find_gfx_family(g_vk.phys, qp, nq);
+    g_gfx_queues = g_vk.gfx_family < nq ? qp[g_vk.gfx_family].queueCount : 1;
     g_vk.xfer_family = g_vk.gfx_family;
     for (uint32_t i = 0; i < nq; i++)   // a family that does transfer only (async DMA engine)
         if ((qp[i].queueFlags & VK_QUEUE_TRANSFER_BIT) && !(qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
@@ -308,9 +310,12 @@ static int create_device(void) {
     }
 
     float prio = 1.0f;
+    static const float gfx_prio[2] = {1.0f, 1.0f};
+    const char *pq = getenv("TOTK_PRESENT_QUEUE");   // default 1 on vk_caps.amd_sc, 0 elsewhere (gfx_queue, queue lock)
+    int own_present = g_gfx_queues >= 2 && (pq && *pq ? strcmp(pq, "0") != 0 : vk_caps.amd_sc);
     VkDeviceQueueCreateInfo qi[2] = {
-        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = 1,
-         .pQueuePriorities = &prio}};
+        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family,
+         .queueCount = own_present ? 2u : 1u, .pQueuePriorities = gfx_prio}};
     uint32_t nqi = 1;
     if (g_vk.xfer_family != g_vk.gfx_family) {
         qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -323,6 +328,11 @@ static int create_device(void) {
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
+    if (own_present) vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 1, &g_vk.present_queue);
+    else g_vk.present_queue = g_vk.gfx_queue;
+    rt_log("vk: present queue: %s", own_present ? "its own queue of the graphics family (present lock only)"
+                                   : g_gfx_queues < 2 ? "the graphics queue (the family has one queue)"
+                                                    : "the graphics queue (TOTK_PRESENT_QUEUE)");
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
 
