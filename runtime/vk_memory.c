@@ -1053,7 +1053,7 @@ static int query_stamp(uint64_t lo, uint64_t hi, uint32_t g) {
 // - GPU -> guest: the replay notes each GPU write into CPU-visible memory at record time (vk_mem_gpu_pending) and
 //   reports it at the fence (vk_gpu_written), which copies those bytes back into guest memory. Until then the CPU
 //   copies skip them: a page the CPU and the GPU both write keeps the GPU's bytes.
-// TOTK_SHADOW=1/0 forces the mode on or off; the default is on for Linux.
+// TOTK_SHADOW=1/0 forces the mode on or off; the default is on for Linux except on NVIDIA (#74).
 typedef struct { uint64_t lo, hi; } SRange;
 static PlatMutex shadow_lock = PLAT_MUTEX_INIT;   // after pool_lock; before gen_lock
 static PoolRec **stouch;                          // shadow_lock: pools resolved since the last sync
@@ -1391,7 +1391,7 @@ static PlatMutex mirror_stat_lock = PLAT_MUTEX_INIT;
 static volatile int64_t m_live_n, m_live_bytes, m_refused_n[MR_N], m_refused_bytes[MR_N];
 static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mismatch;
 
-static void mirror_mode(int discrete) {
+static void mirror_mode(int discrete, uint32_t vendor) {
     const char *e = cfg_value("TOTK_MEMORY");
     int mode = discrete ? 1 : 0;   // 0 import, 1 mirror, 2 verify
     const char *why = discrete ? "auto, discrete gpu" : "auto, uma";
@@ -1413,12 +1413,17 @@ static void mirror_mode(int discrete) {
     if (freeze_idle < 0) freeze_idle = 0;
     const char *sh = cfg_get("TOTK_SHADOW");
 #ifdef _WIN32
+    (void)vendor;
     shadow_on = sh && *sh && strcmp(sh, "0");
 #else
-    shadow_on = !sh || !*sh || strcmp(sh, "0");
+    // NVIDIA's driver: shadow storage washes cutscenes and play out to white (#74), and the imports render correctly.
+    shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : vendor != 0x10de;
 #endif
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (TOTK_SHADOW)" : "");
+#ifndef _WIN32
+    else if (!(sh && *sh)) rt_log("mem: no shadow storage on NVIDIA (TOTK_SHADOW=1 turns it on)");
+#endif
     rt_log("mem: mode %s (%s): %s", mode == 2 ? "verify" : mode ? "mirror" : "import", why,
            mode ? "pools used as buffers get a device-local mirror" : "every CPU-visible pool is imported host memory");
 }
@@ -2075,7 +2080,7 @@ void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDevic
                               f & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT ? " LAZY" : "");
     }
     rt_log("%s", line);
-    mirror_mode(discrete);
+    mirror_mode(discrete, p->vendorID);
 }
 
 // ---------------------------------------------------------------- upload batches and deferred destruction
