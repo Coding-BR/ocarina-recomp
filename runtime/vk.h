@@ -111,6 +111,9 @@ int vk_framegen_mult(void);
 // scene depth (R32F, GENERAL, w x h), for vk_framegen_make's camera vectors.
 typedef struct { float view[12], p00, p11, lin_x, lin_y, near_; VkImageView depth; uint32_t w, h; } OotMotionFrame;
 int oot_motion_take(OotMotionFrame *out);
+int oot_motion_peek(OotMotionFrame *out, uint64_t *seq);
+int oot_motion_scene_taa(void);
+void oot_motion_delta(const float *last, const float *cur, float m[12]);   // rows of last view * inverse(this view)
 int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4], const OotMotionFrame *mo, VkImage out[],
                      int *ow, int *oh);
 VkFormat vk_framegen_format(void);

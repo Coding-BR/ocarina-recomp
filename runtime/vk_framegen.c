@@ -226,18 +226,6 @@ static void pass(VkCommandBuffer cb, const Pass *p, const VkImageView *views, co
     barrier_all(cb);
 }
 
-// The rows of last view * inverse(this view) (views are rigid: inverse = [R^T | -R^T t]).
-static void cam_delta(const float *last, const float *cur, float m[12]) {
-    float ri[3][3], ti[3];
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++) ri[i][j] = cur[j * 4 + i];
-    for (int i = 0; i < 3; i++) ti[i] = -(ri[i][0] * cur[3] + ri[i][1] * cur[7] + ri[i][2] * cur[11]);
-    for (int r = 0; r < 3; r++) {
-        for (int j = 0; j < 3; j++) m[r * 4 + j] = last[r * 4] * ri[0][j] + last[r * 4 + 1] * ri[1][j] + last[r * 4 + 2] * ri[2][j];
-        m[r * 4 + 3] = last[r * 4] * ti[0] + last[r * 4 + 1] * ti[1] + last[r * 4 + 2] * ti[2] + last[r * 4 + 3];
-    }
-}
-
 int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4], const OotMotionFrame *mo, VkImage out[],
                      int *ow, int *oh) {
     int mult = vk_framegen_mult();
@@ -314,7 +302,7 @@ int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4
         if (cam_on < 0) { const char *e = getenv("OOT_FG_CAMERA"); cam_on = !(e && *e == '0'); }
         if (cam_on && mo && G.have_cam && mo->depth) {
             struct { float m[12], proj[4], size[4]; } pk;
-            cam_delta(G.prev_cam.view, mo->view, pk.m);
+            oot_motion_delta(G.prev_cam.view, mo->view, pk.m);
             pk.proj[0] = mo->p00, pk.proj[1] = mo->p11, pk.proj[2] = mo->lin_y, pk.proj[3] = mo->lin_x;
             pk.size[0] = (float)uw, pk.size[1] = (float)uh, pk.size[2] = mo->near_, pk.size[3] = 0;
             pass(cb, &G.camflow, (VkImageView[]){G.luma_img[prev].view, G.luma_img[cur].view, G.flowv[1].view, mo->depth,
