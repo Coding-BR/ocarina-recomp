@@ -527,6 +527,7 @@ int vk_pipeline_async_on(void);   // 1 after vk_pipeline_async_enable: graphics 
 void vk_pipeline_prewarm(void);
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info);
 int vk_pipeline_compute_ready(const GfxShader *cs);   // LOCAL TEST (Ocarina): 0 while a big compute shader builds in the background
+void vk_pipeline_big_cs_met(const GfxShader *cs, uint64_t origin);   // LOCAL TEST (Ocarina): lists it for --warm-big-cs
 // Records every dynamic state that VkPipeState determines, after binding a graphics pipeline: cull mode, front face,
 // topology, depth and stencil tests and ops, depth bias enable, rasterizer discard, vertex input, and, where the GPU
 // has them dynamic, depth clamp, polygon mode, blend enables, equations, write masks and alpha to coverage. The replay

@@ -3805,6 +3805,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
         const uint8_t *cctl, *ccode = NULL;
         uint32_t clen;
         uint64_t origin = find_stage(ex->prog, NVN_STAGE_CS, &cctl, &ccode, &clen) ? nvn2_origin(ccode) : 0;
+        vk_pipeline_big_cs_met(cs, origin);   // before DKB_SKIP_CS: --warm-big-cs reads the origin there
         if (!init) {
             init = 1;
             const char *e = getenv("DKB_SKIP_CS");
@@ -3918,6 +3919,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
         const uint8_t *cctl, *ccode = NULL;
         uint32_t clen;
         uint64_t origin = find_stage(ex->prog, NVN_STAGE_CS, &cctl, &ccode, &clen) ? nvn2_origin(ccode) : 0;
+        vk_pipeline_big_cs_met(cs, origin);
         int known = 0;
         for (int i = 0; i < nseen; i++) known |= seen[i] == origin;
         if (!known && nseen < 1024) {
