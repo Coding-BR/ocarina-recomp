@@ -465,11 +465,14 @@ function PastaPadrao() {
 function Validar() {
     $problema = @()
     $unid = $script:pasta.Substring(0, 1)
-    $livre = [Math]::Floor((Get-PSDrive $unid).Free / 1GB)
+    # DriveInfo, not Get-PSDrive: an F: drive with 403 GB free read as 0 GB and Instalar stayed off (issue #114).
+    # When the size cannot be read the install is not blocked: the step that runs out of space says so.
+    $livre = try { $di = New-Object IO.DriveInfo $unid; if ($di.IsReady) { [Math]::Floor($di.AvailableFreeSpace / 1GB) } else { -1 } } catch { -1 }
     $parcial = Test-Path (Join-Path $script:pasta 'build\romfs\index.json')
     if ($script:pasta -match '[^\x21-\x7E]|[\[\]%&]') { $problema += (L 'A pasta de instalação não pode ter espaços nem acentos.' 'The install folder cannot have spaces or accents.') }
-    elseif (-not $parcial -and $livre -lt $GB_NECESSARIOS) { $problema += (L "Faltam $($GB_NECESSARIOS - $livre) GB livres em ${unid}: (precisa de $GB_NECESSARIOS GB)." "You need $($GB_NECESSARIOS - $livre) GB more free on ${unid}: ($GB_NECESSARIOS GB required).") }
-    $lbPasta.Text = (L "$($script:pasta)   ($livre GB livres)" "$($script:pasta)   ($livre GB free)")
+    elseif (-not $parcial -and $livre -ge 0 -and $livre -lt $GB_NECESSARIOS) { $problema += (L "Faltam $($GB_NECESSARIOS - $livre) GB livres em ${unid}: (precisa de $GB_NECESSARIOS GB)." "You need $($GB_NECESSARIOS - $livre) GB more free on ${unid}: ($GB_NECESSARIOS GB required).") }
+    $txt = if ($livre -ge 0) { "$livre" } else { "?" }
+    $lbPasta.Text = (L "$($script:pasta)   ($txt GB livres)" "$($script:pasta)   ($txt GB free)")
     $lbAviso.Text = ($problema + @($script:avisos | ForEach-Object { Pick $_ })) -join "`n"
     $pronta = JaInstalada $script:pasta
     if ($pronta -and -not $script:jogo) { $script:jogoEstado = 'pronta' }
