@@ -678,6 +678,8 @@ void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
     }
     (void)total;
     rt_log("gpu prof: frame %ld: %d marks over 6 presents, %.1f ms timed (%.1f per present)", f, n, valid, valid / 6);
+    if (n == PN)   // the marks after the last slot were dropped: the six presents are not all timed
+        rt_log("gpu prof: all %d slots used before the 6 presents ended: the per-present numbers below are low", PN);
     for (int k = 0; k < 4; k++) rt_log("gpu prof: %s %.1f ms per present", names[k], bykind[k] / 6);
     for (int r = 0; r < 30; r++) {
         int best = -1;
