@@ -33,6 +33,8 @@
 #include "vk_exec.h"
 #include "platform/platform.h"
 
+void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id);   // vk_exec.c: OOT_GPU_PROF
+
 #define MAX_BINDINGS 256   // LOCAL TEST (Ocarina): was 128; guarded vertex and fragment stages together passed it and the draws were lost
 // NVN 2 compute parameter layout of the program being dispatched (gfx_shader_c0_layout), NULL for NVN 1: read by
 // vk_c0_fill, set by the dispatch ops around bind_resources like c0_dim.
@@ -3234,6 +3236,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         bind_index(ex, ix, sizeof *ix * 6 * q, VK_INDEX_TYPE_UINT32);
         free(ix);
         vkCmdDrawIndexed(ex->cb, 6 * q, inst, 0, 0, (uint32_t)d->base_instance);
+        vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0);
     } else if (d->prim == NVN_DRAW_PRIMITIVE_LINE_LOOP && n >= 2) {   // a strip that returns to its first vertex
         uint32_t *ix = malloc(sizeof *ix * (n + 1));
         if (!ix) rt_fatal("vk: out of memory");
@@ -3242,8 +3245,10 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         bind_index(ex, ix, sizeof *ix * (n + 1), VK_INDEX_TYPE_UINT32);
         free(ix);
         vkCmdDrawIndexed(ex->cb, n + 1, inst, 0, 0, (uint32_t)d->base_instance);
+        vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0);
     } else {
         vkCmdDraw(ex->cb, n, inst, first, (uint32_t)d->base_instance);
+        vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0);
     }
     ex->recorded++;
     note_work(ex, 0, (uint64_t)n * inst);
@@ -3308,6 +3313,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     int ds_open = ds_begin(ex, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1);
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
+    vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0);
     ex->recorded++;
     note_work(ex, 0, (uint64_t)d->count * (uint64_t)(d->instances > 0 ? d->instances : 1));
     if (ds_open) ds_end(ex);
@@ -3443,6 +3449,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     VK_MEM_USE(ib);
     vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+    vk_prof_mark(ex, "draw", ex->prog ? ex->prog->serial : 0);
     ex->recorded += 2;
     note_work(ex, 1, 0);
     // An imported pool's GPU address is its host address (bind_range reads it the same way); device memory is not.
@@ -3881,7 +3888,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     bind_resources(ex, info);
     twin_dispatch = 0;
     vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
-    { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "dispatch", ex->prog ? ex->prog->serial : 0); }
+    vk_prof_mark(ex, "dispatch", ex->prog ? ex->prog->serial : 0);
     ex->recorded++;
     note_work(ex, 2, (uint64_t)d->x * (uint64_t)d->y * (uint64_t)d->z);
     if (vk_dump_armed) vk_dump_dispatch(ex, cs, p, info, d);
@@ -3979,7 +3986,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
         B.c0_valid[2] = 0;   // the range no longer holds B.c0[2]
     }
     vkCmdDispatchIndirect(ex->cb, ip.buffer, ip.offset);
-    { extern void vk_prof_mark(VkExec *, const char *, uint64_t); vk_prof_mark(ex, "dispatch", ex->prog ? ex->prog->serial : 0); }
+    vk_prof_mark(ex, "dispatch", ex->prog ? ex->prog->serial : 0);
     ex->recorded++;
     note_work(ex, 3, 0);
     vk_mem_count(ip.cls, VK_MUSE_IND, sizeof(VkDispatchIndirectCommand));
