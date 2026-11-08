@@ -2264,6 +2264,44 @@ void vk_upload_end(void) { plat_rmutex_unlock(&cmd_lock); }
 static VmaPool stg_pool;
 static int stg_pool_tried;
 
+// A staging buffer that does not fit: VK_ERROR_OUT_OF_DEVICE_MEMORY at once after a save load inside the first big
+// area (RX 5500 XT, 16 GB, host heap 8158 MiB), where it was fatal. The open batch cannot be submitted here (the caller
+// already holds its command buffer), so: log the heaps; wait for the batches already submitted and free their staging
+// and the dead objects they kept, then retry; then try any host-visible type (VRAM through the BAR heap); then wait up
+// to 2 s for other threads to free memory. Caller holds cmd_lock (vk_upload_begin).
+// Tested: docs/test-environment-rx5500xt.md.
+static VkResult staging_recover(VkCtx *c, const VkBufferCreateInfo *bi, const VmaAllocationCreateInfo *aci, VkBuffer *b,
+                                VmaAllocation *a, VmaAllocationInfo *info, VkResult r) {
+    static volatile int32_t logged, saved;
+    if (plat_inc32(&logged) <= 4) {
+        VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+        vmaGetHeapBudgets(c->vma, bud);
+        const VkPhysicalDeviceMemoryProperties *mp = NULL;
+        vmaGetMemoryProperties(c->vma, &mp);
+        for (uint32_t h = 0; mp && h < mp->memoryHeapCount; h++)
+            rt_log("vk: staging of %llu bytes failed (%d): heap %u: %.0f of %.0f MiB in use, %.0f MiB in VMA blocks (%u)",
+                   (unsigned long long)bi->size, (int)r, h, bud[h].usage / 1048576.0, bud[h].budget / 1048576.0,
+                   bud[h].statistics.blockBytes / 1048576.0, bud[h].statistics.blockCount);
+    }
+    VmaAllocationCreateInfo plain = *aci;
+    plain.pool = NULL;
+    VmaAllocationCreateInfo bar = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                                   .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+    const char *how = NULL;
+    for (int i = 0; i < 41 && r != VK_SUCCESS; i++) {
+        if (i) plat_sleep_ms(50);
+        retire(c, 1);           // the submitted batches: their staging goes
+        collect_locked(c);      // and what they kept alive
+        if ((r = vmaCreateBuffer(c->vma, bi, aci, b, a, info)) == VK_SUCCESS) how = "after the submitted uploads finished";
+        else if ((r = vmaCreateBuffer(c->vma, bi, &plain, b, a, info)) == VK_SUCCESS) how = "outside the staging pool";
+        else if ((r = vmaCreateBuffer(c->vma, bi, &bar, b, a, info)) == VK_SUCCESS) how = "in host-visible VRAM";
+        if (r == VK_SUCCESS && plat_inc32(&saved) <= 8)
+            rt_log("vk: staging of %llu bytes placed %s (%d wait(s) of 50 ms)", (unsigned long long)bi->size, how, i);
+    }
+    return r;
+}
+
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     VkCtx *c = vk_ctx();
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size ? size : 16,
@@ -2291,6 +2329,11 @@ void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
     VkBuffer b;
     VmaAllocation a;
     VkResult r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+    if (r != VK_SUCCESS) {
+        plat_rmutex_lock(&cmd_lock);
+        r = staging_recover(c, &bi, &aci, &b, &a, &info, r);
+        plat_rmutex_unlock(&cmd_lock);
+    }
     if (r != VK_SUCCESS) rt_fatal("vk: staging buffer of %llu bytes failed (%d)", (unsigned long long)size, (int)r);
     plat_add64(&up_bytes, (int64_t)bi.size);
     *buf = b;
