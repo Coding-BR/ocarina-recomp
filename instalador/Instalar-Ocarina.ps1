@@ -364,8 +364,11 @@ function P-Shaders() {
         Exec $script:py @('-I', 'tools\oot\shader_extract.py', '--romfs-image', (Build 'romfs\romfs.bin'), '--index', (Build 'romfs\index.json'), '--pack', $pack) | Out-Null
         Exec $exe @('--lower-stages', $pack, $dir) | Out-Null
         Copy-Item -LiteralPath (Join-Path $seed 'seed-answers.bin') -Destination (Join-Path $dir 'seed-answers.bin') -Force
-        # the player's own keys, from earlier play, are kept
-        if (-not (Test-Path (Join-Path $dir 'pipeline-keys.bin'))) { Copy-Item -LiteralPath (Join-Path $seed 'pipeline-keys.bin') -Destination (Join-Path $dir 'pipeline-keys.bin') }
+        # the player's own keys, from earlier play, are kept and the seed's are added to them: an update's seed names
+        # pipelines (the vegetation's) that a player's earlier keys do not, and they were built in play then
+        $chaves = Join-Path $dir 'pipeline-keys.bin'
+        if (Test-Path -LiteralPath $chaves) { Exec $script:py @('-I', 'tools\oot\merge_records.py', $chaves, $chaves, (Join-Path $seed 'pipeline-keys.bin')) | Out-Null }
+        else { Copy-Item -LiteralPath (Join-Path $seed 'pipeline-keys.bin') -Destination $chaves }
         Exec $exe @('--prepare-shaders') | Out-Null
     } catch {
         if ("$($_.Exception.Message)" -eq 'CANCELADO') { throw }
