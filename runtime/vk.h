@@ -103,6 +103,13 @@ void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int
 int vk_fsr_record(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, int sw, int sh, const int crop[4],
                   VkImage dst, const int out[4]);
 void vk_fsr_release(void);   // before the device goes away
+// vk_framegen.c: frame interpolation (TOTK_FRAMEGEN). vk_framegen_make records and submits the made frames between the
+// last game frame and src (its crop): their images (RGBA16F, GENERAL, ow x oh) go to out[], their count is returned (0:
+// none this frame, the game's frame is shown alone).
+int vk_framegen_mult(void);
+int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4], VkImage out[], int *ow, int *oh);
+VkFormat vk_framegen_format(void);
+void vk_framegen_release(void);
 // Colour adjustment on the present (vk_color.c): with TOTK_COLOR_* away from their defaults, records a pass that writes
 // src's crop rectangle {x, y, w, h}, adjusted, into an RGBA16F image of that size in GENERAL and returns it (the caller
 // scales that one instead, crop {0, 0, w, h}); VK_NULL_HANDLE = nothing recorded. src is in GENERAL, fmt its format.

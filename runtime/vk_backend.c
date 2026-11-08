@@ -77,6 +77,29 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         if (flight_on) vk_thumbs_frame(j.frame);
+        {   // Frame interpolation (vk_framegen.c, TOTK_FRAMEGEN): the made frames between the last game frame and this one
+            // go out first, evenly over the recent interval between the game's frames, each flipped when it is due
+            VkImage made[4];
+            int fw = 0, fh = 0, n = vk_framegen_make(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, made, &fw, &fh);
+            static uint64_t interval = 16666667, fg_shown, fg_made, fg_frames;
+            if (last && j.at > last) {
+                uint64_t d = j.at - last;
+                if (d > 4000000 && d < 100000000) interval = (interval * 7 + d) / 8;
+            }
+            for (int k = 0; k < n && last; k++) {
+                uint64_t due = last + interval * (uint64_t)(k + 1) / (uint64_t)(n + 1);
+                if (kern_now_ns() > due + interval / (uint64_t)(n + 1)) continue;   // late: the next one or the game's
+                wait_until(due);
+                vk_present_image(made[k], VK_IMAGE_LAYOUT_GENERAL, vk_framegen_format(), fw, fh, NULL);
+                fg_shown++;
+            }
+            fg_made += (uint64_t)n;
+            if (n && ++fg_frames % 600 == 0) {
+                rt_log("vk: frame interpolation: %llu of %llu made frames shown in the last 600 game frames (late ones skipped)",
+                       (unsigned long long)fg_shown, (unsigned long long)fg_made);
+                fg_shown = fg_made = 0;
+            }
+        }
         vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         uint64_t f = vk_sync_submit(NULL, 0, 0); // no guest reports; this value only covers the blit
         if (j.value && f != j.value)
