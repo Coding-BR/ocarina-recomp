@@ -488,6 +488,7 @@ static void game_defaults(void) {
         {"TOTK_GPL", "0"},
         {"TOTK_ASYNC_PREEMPT", "0"},
         {"DKB_SKIP_CS", "dec1feb3c7fa967a,3f6f2b1d671badcd"},
+        {"OOT_EV", "-1.25"},   // boot.c oot_exposure: the views' exposure, which nothing here writes (washed-out picture)
     };
     for (size_t i = 0; i < sizeof d / sizeof *d; i++) {
         if (getenv(d[i][0])) continue;
