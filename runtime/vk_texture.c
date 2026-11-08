@@ -712,7 +712,8 @@ static void upload(Tex *e) {
         for (uint32_t ly = 0; ly < layers; ly++) {
             uint32_t w = mip(d->width, lv), h = one_d ? 1 : mip(d->height, lv), sl = is3d ? mip(d->depth, lv) : 1;
             uint64_t texels = (uint64_t)w * h * sl, raw = (uint64_t)(w + bw - 1) / bw * bpb * ((h + bh - 1) / bh) * sl;
-            uint64_t out = agpu ? raw : astc ? texels * 4 : rgb ? texels * (uint64_t)bpb / 3 * 4 : raw;
+            uint64_t bc = (uint64_t)(w + 3) / 4 * ((h + 3) / 4) * 16 * sl;   // ASTC as BC3 from the CPU decoder
+            uint64_t out = agpu ? raw : astc ? (e->f.astc_bc ? bc : texels * 4) : rgb ? texels * (uint64_t)bpb / 3 * 4 : raw;
             rg[k++] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {e->pub.aspect, lv, ly, 1},
                                           .imageExtent = {w, h, sl}};
             total += (out + 15) & ~15ull;
@@ -738,11 +739,17 @@ static void upload(Tex *e) {
                 ar[k] = (VkAstcRegion){.src = rg[k].bufferOffset, .w = w, .h = h, .slices = sl, .level = lv, .layer = ly};
             } else if (astc) {
                 uint64_t a0 = perf_begin();
-                for (uint32_t z = 0; z < sl; z++)
+                uint8_t *px = e->f.astc_bc ? malloc((size_t)w * h * 4) : NULL;
+                if (e->f.astc_bc && !px) rt_fatal("vk: out of memory for a BC3 encode");
+                for (uint32_t z = 0; z < sl; z++) {
                     astc_decode_ldr_mt(tmp + (size_t)z * rb * rows, w, h, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb,
-                                       dst + (size_t)z * w * h * 4);
+                                       px ? px : dst + (size_t)z * w * h * 4);
+                    if (px) bc3_encode_mt(px, w, h, dst + (size_t)z * ((w + 3) / 4) * ((h + 3) / 4) * 16);
+                }
+                free(px);
                 perf_end(PERF_ASTC, a0);
-                rg[k].bufferRowLength = w, rg[k].bufferImageHeight = h;
+                // BC3: tightly packed blocks (row length 0); RGBA8: w texels a row
+                if (!e->f.astc_bc) rg[k].bufferRowLength = w, rg[k].bufferImageHeight = h;
             } else if (rgb) {
                 expand_rgb(d->format, tmp, dst, (size_t)w * h * sl);
                 rg[k].bufferRowLength = w, rg[k].bufferImageHeight = h;
@@ -1358,6 +1365,8 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
     int rgb = e->f.expand_rgb, astc = e->f.astc_bw != 0, agpu = astc && write && vk_astc_gpu();
     size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
     size_t slice = ib ? texels * ib : g->wb * g->hb;   // agpu: the raw blocks, decoded by vk_astc_record
+    int cbc = astc && !agpu && e->f.astc_bc;           // the CPU decoder's BC3 (tex_bc3.c): whole blocks
+    if (cbc) slice = (size_t)((w + 3) / 4) * ((h + 3) / 4) * 16;
     VkBuffer sb;
     VmaAllocation sa;
     uint8_t *stg = vk_staging(slice * (size_t)g->nz, &sb, &sa);
@@ -1372,7 +1381,11 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
                 uint8_t *tight = malloc(g->wb * g->hb);
                 for (size_t y = 0; y < g->hb; y++) memcpy(tight + y * g->wb, m + y * g->row, g->wb);
                 uint64_t a0 = perf_begin();
-                astc_decode_ldr_mt(tight, w, h, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb, s);
+                uint8_t *px = cbc ? malloc(texels * 4) : NULL;
+                if (cbc && !px) rt_fatal("vk: out of memory for a BC3 encode");
+                astc_decode_ldr_mt(tight, w, h, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb, px ? px : s);
+                if (px) bc3_encode_mt(px, w, h, s);
+                free(px);
                 perf_end(PERF_ASTC, a0);
                 free(tight);
             } else if (rgb) {
@@ -1407,7 +1420,9 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
             perf_end(PERF_ASTC, a0);
             free(ar);
         }
-        if (!agpu) vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)g->nz, rg);
+        if (!agpu && !(cbc && bc_cut)) vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)g->nz, rg);
+        else if (!agpu) log_limited(&n_astc, "WriteTexels of ASTC texture %#llx ends inside a BC3 block: left as it was",
+                                    (unsigned long long)e->pub.addr);
         else if (!done) log_limited(&n_astc, "WriteTexels of ASTC texture %#llx not decoded on the GPU: left as it was",
                                     (unsigned long long)e->pub.addr);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
