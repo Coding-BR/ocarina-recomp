@@ -401,6 +401,7 @@ void vk_texture_census(VkTexCensus *s);
 
 void vk_texture_shutdown(void);                     // vk_mem_shutdown calls it
 void vk_texture_new_submit(void);                   // a queue submit starts: draw bindings check storage again
+void vk_texture_vram_short(uint64_t bytes);         // an allocation failed: old released textures go at the next submit
 uint32_t vk_texture_epoch(void);                    // the write-watch snapshot epoch vk_texture_new_submit started
 VkSampler vk_sampler_by_id(const dpool_ref *pool, int id);
 VkSampler vk_sampler_for(const samp_par *s);        // cached by content
