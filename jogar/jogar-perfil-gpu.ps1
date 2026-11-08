@@ -5,7 +5,6 @@
 # O log fica em ultima-partida-erros.log; feche pelo X da janela para salvar o cache de pipelines.
 $raiz = Split-Path $PSScriptRoot -Parent
 $env:TOTK_TRACE = 'perf'
-$env:TOTK_ASTC_BC = '1'
 $env:OOT_GPU_PROF = '1200'
 $env:OOT_GPU_PROF_EVERY = '3600'
 $env:OOT_GPU_PROF_DRAWS = '1'

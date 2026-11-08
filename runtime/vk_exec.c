@@ -689,6 +689,14 @@ void vk_prof_mark(VkExec *ex, const char *kind, uint64_t id) {
     static long every = -2;
     if (every == -2) { const char *e = getenv("OOT_GPU_PROF_EVERY"); every = e ? atol(e) : 0; }
     if (every > 14) {   // every query was read above, so the pool can be reset from the host
+        // vk_device.c enables every feature the device reports, so supported means enabled (as vk_astc.c checks it).
+        VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12};
+        vkGetPhysicalDeviceFeatures2(c->phys, &f2);
+        if (!f12.hostQueryReset) {
+            rt_log("gpu prof: no hostQueryReset: OOT_GPU_PROF_EVERY does not repeat");
+            return;
+        }
         vkResetQueryPool(c->device, pool, 0, PN);
         n = 0, done = 0, at = f + every;
     }
