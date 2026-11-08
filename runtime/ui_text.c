@@ -81,6 +81,13 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FRAMEGEN_DESC] = "Shows frames made between the game's, for a smoother picture on a high refresh rate "
                               "monitor (2x on 120 Hz, 4x on 240 Hz). Experimental: fast motion may show artefacts.",
     [UI_MENU_FRAMEGEN_OFF] = "Off",
+    [UI_MENU_QUALITY] = "Quality preset",
+    [UI_MENU_QUALITY_DESC] = "Sets the 3D render scale, scene upscaling, frame generation (by your monitor's refresh "
+                             "rate) and texture compression together. Auto picks by your graphics card's memory. "
+                             "Changing one of them yourself makes it Custom. The render scale and texture compression "
+                             "apply after a restart.",
+    [UI_MENU_QUALITY_CUSTOM] = "Custom", [UI_MENU_QUALITY_AUTO] = "Auto", [UI_MENU_QUALITY_LOW] = "Low",
+    [UI_MENU_QUALITY_MEDIUM] = "Medium", [UI_MENU_QUALITY_HIGH] = "High", [UI_MENU_QUALITY_ULTRA] = "Ultra",
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
     [UI_MENU_COLOR] = "Colour",
     [UI_MENU_COLOR_PRESET] = "Colour profile",
@@ -352,6 +359,13 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                               "высокой частотой (2x на 120 Гц, 4x на 240 Гц). Экспериментально: при быстром движении "
                               "возможны артефакты.",
     [UI_MENU_FRAMEGEN_OFF] = "Выкл.",
+    [UI_MENU_QUALITY] = "Пресет качества",
+    [UI_MENU_QUALITY_DESC] = "Задаёт сразу масштаб 3D-рендера, масштабирование сцены, генерацию кадров (по частоте "
+                             "монитора) и сжатие текстур. Авто выбирает по памяти видеокарты. Если изменить что-то из "
+                             "этого вручную, пресет станет Свой. Масштаб рендера и сжатие текстур применяются после "
+                             "перезапуска.",
+    [UI_MENU_QUALITY_CUSTOM] = "Свой", [UI_MENU_QUALITY_AUTO] = "Авто", [UI_MENU_QUALITY_LOW] = "Низкое",
+    [UI_MENU_QUALITY_MEDIUM] = "Среднее", [UI_MENU_QUALITY_HIGH] = "Высокое", [UI_MENU_QUALITY_ULTRA] = "Ультра",
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
     [UI_MENU_COLOR] = "Цвет",
     [UI_MENU_COLOR_PRESET] = "Цветовой профиль",
