@@ -23,6 +23,7 @@
 
 #include "tex.h"
 #include "oot_scene_spv.h"
+#include "oot_scene_easu_spv.h"
 #include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -3742,10 +3743,13 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
     vkCmdCopyImage(ex->cb, src->image, VK_IMAGE_LAYOUT_GENERAL, e5, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
     ib.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     vkCmdPipelineBarrier2(ex->cb, &di);
-    static VkPipeline pipe;
+    static VkPipeline pipe, easu;
     static VkPipelineLayout layout;
     static VkSampler samp;
     static PFN_vkCmdPushDescriptorSetKHR push;
+    // OOT_SCENE_EASU=0: the bilinear sample of oot_scene.comp; else FSR 1 EASU (oot_scene_easu.comp), sharper edges
+    static int use_easu = -1;
+    if (use_easu < 0) { const char *e = getenv("OOT_SCENE_EASU"); use_easu = !(e && *e == '0'); }
     if (!pipe) {
         VkDevice dev = vk_ctx()->device;
         push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(dev, "vkCmdPushDescriptorSetKHR");
@@ -3755,7 +3759,7 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
         VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                                .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = db};
         VkDescriptorSetLayout dsl;
-        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
+        VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
         VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
                                          .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
         VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
@@ -3771,6 +3775,14 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
                                           .layout = layout};
         if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &pipe) != VK_SUCCESS) rt_fatal("vk: scene pass pipeline");
         vkDestroyShaderModule(dev, m, NULL);
+        VkShaderModuleCreateInfo me = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof oot_scene_easu_spv,
+                                       .pCode = oot_scene_easu_spv};
+        if (use_easu && vkCreateShaderModule(dev, &me, NULL, &m) == VK_SUCCESS) {
+            ci.stage.module = m;
+            if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &easu) != VK_SUCCESS) easu = VK_NULL_HANDLE;
+            vkDestroyShaderModule(dev, m, NULL);
+        }
+        rt_log("vk: the game's upscaler is stood in for by %s", easu ? "FSR 1 EASU" : "a bilinear sample");
     }
     VkImageView dv = vk_exec_target_view(dst, dst->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1, 0);
     VkDescriptorImageInfo ii[2] = {{samp, e5_view, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, dv, VK_IMAGE_LAYOUT_GENERAL}};
@@ -3778,9 +3790,15 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[1]}};
     float inv[2] = {1.0f / (float)dst->width, 1.0f / (float)dst->height};
-    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, easu ? easu : pipe);
     rec_push(push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 2, w);   // through the recorder, in order with the rest
-    vkCmdPushConstants(ex->cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof inv, inv);
+    if (easu) {
+        float pc[8] = {(float)src->width, (float)src->height, (float)src->width, (float)src->height, (float)dst->width,
+                       (float)dst->height, 0, 0};
+        vkCmdPushConstants(ex->cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    } else {
+        vkCmdPushConstants(ex->cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof inv, inv);
+    }
     vkCmdDispatch(ex->cb, (dst->width + 15) / 16, (dst->height + 15) / 16, 1);
     B.pipe[1] = VK_NULL_HANDLE;   // this pass's pipeline is not the one the bind state remembers; compute sets are written per dispatch
     ex->recorded++;
