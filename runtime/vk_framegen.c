@@ -2,8 +2,9 @@
 // shows n frames per game frame, n - 1 of them made from the game's last two and shown before it, evenly over the time
 // since the last one. 1 (the default) shows the game's frames alone. Ported from NotRexed/Hookshot gpu/vk/vk_framegen.cpp
 // (GPL-3.0, as this repository); its shaders are runtime/shaders/fg_*.comp:
-//   1. the game's frame (its crop) is copied into an RGBA16F image through a view of its own format (linear values,
-//      as vk_fsr.c reads it), and reduced to quarter-size luma;
+//   1. the game's frame (its crop) is copied into an RGBA16F image through a view of its own format, as vk_fsr.c reads
+//      it, and reduced to quarter-size luma. Ocarina's window texture is UNORM holding display values, the values the
+//      thresholds of fg_synth.comp were tuned on (compared after a square root, as if linear, made white flashes);
 //   2. block matching: a vector per 16x16 pixels within +-32 pixels, then a 3x3 median of them;
 //   3. each made frame at time t blends the last frame moved back along t and the new one forward along 1 - t, and
 //      where the two frames agree, or no vector explains the change, the plain blend or the nearer frame.
@@ -45,6 +46,7 @@ static struct {
     int mult, cur, have_prev, set;
     uint64_t last_ns;
     VkImageView src_view[2];
+    VkFormat src_fmt;
 } G;
 
 int vk_framegen_mult(void) {
@@ -192,7 +194,7 @@ static int ensure_images(VkCtx *c, VkCommandBuffer cb, uint32_t w, uint32_t h, i
         for (int m = 0; m < mult - 1; m++) to_general(cb, G.made[k][m].image);
     }
     G.w = w, G.h = h, G.mult = mult;
-    rt_log("vk: frame interpolation: %dx at %ux%u", mult, w, h);
+    rt_log("vk: frame interpolation: %dx at %ux%u (source format %d)", mult, w, h, (int)G.src_fmt);
     return 1;
 }
 
@@ -221,6 +223,7 @@ int vk_framegen_make(VkImage src, VkFormat fmt, int sw, int sh, const int crop[4
     VkCtx *c = vk_ctx();
     if (!G.tried && !init(c)) return 0;
     if (!G.ok) return 0;
+    G.src_fmt = fmt;
     int x0 = 0, y0 = 0, w = sw, h = sh;
     if (crop && crop[2] > 0 && crop[3] > 0) x0 = crop[0], y0 = crop[1], w = crop[2], h = crop[3];
     if (x0 < 0 || y0 < 0 || x0 + w > sw || y0 + h > sh || w <= 0 || h <= 0) return 0;

@@ -12,8 +12,7 @@ layout(binding = 2) uniform sampler2D flow;
 layout(binding = 3, rgba16f) uniform writeonly image2D dst;
 layout(push_constant) uniform P { float t; } pc;
 vec2 fl(ivec2 q) { return texelFetch(flow, clamp(q, ivec2(0), textureSize(flow, 0) - 1), 0).xy; }
-// (linear values here: compared after a square root, close to the sRGB values the thresholds were tuned for)
-float gap(vec3 x, vec3 y) { const vec3 d = abs(sqrt(max(x, 0.0)) - sqrt(max(y, 0.0))); return max(d.r, max(d.g, d.b)); }
+float gap(vec3 x, vec3 y) { const vec3 d = abs(x - y); return max(d.r, max(d.g, d.b)); }
 void main() {
     const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 d = imageSize(dst);
