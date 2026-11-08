@@ -302,7 +302,7 @@ static int create_pipeline(VkCtx *c) {
 // 12.5 GB of an 11 GB budget, issue #112: from the Kokiri save on an RTX 5090, ASTC as RGBA8 held 6.8 GB of live
 // textures and as BC3 3.3 GB, with the same load stalls and frame rate). On a GTX 1650 (4 GiB) a new area decoded 940 M
 // texels of ASTC into RGBA8 (3.7 GB), the heap reached 6.1 GB of a 3.3 GB budget and the device was lost.
-static int create_bc_pipeline(VkCtx *c) {
+static int bc_wanted(VkCtx *c) {
     const char *e = cfg_get("TOTK_ASTC_BC");
     if (e && *e && *e == '0') return 0;
     if (!e || !*e) {
@@ -320,6 +320,10 @@ static int create_bc_pipeline(VkCtx *c) {
         rt_log("vk: TOTK_ASTC_BC: the device does not sample BC3; ASTC stays RGBA8");
         return 0;
     }
+    return 1;
+}
+static int create_bc_pipeline(VkCtx *c) {
+    if (!bc_wanted(c)) return 0;
     VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof bc3_encode_spv,
                                    .pCode = bc3_encode_spv};
     VkShaderModule m = VK_NULL_HANDLE;
@@ -373,7 +377,9 @@ int vk_astc_mode(void) {
             rt_log("vk: ASTC compute decoder unavailable on %s: ASTC decodes on the CPU", c->props.deviceName);
         }
         if (G.failed && m != VK_ASTC_NATIVE) m = VK_ASTC_CPU;
-        G.bc = m == VK_ASTC_GPU && G.pipe && create_bc_pipeline(c);
+        // The CPU decoder encodes BC3 itself (tex_bc3.c): on an integrated GPU, where it is the default, the memory is
+        // shared and short (a Vega 11 has 1.75 GiB).
+        G.bc = m == VK_ASTC_GPU ? G.pipe && create_bc_pipeline(c) : m == VK_ASTC_CPU && bc_wanted(c);
         G.mode = m;
         rt_log("vk: ASTC textures: %s (textureCompressionASTC_LDR %d)", mode_name(m), native_device(c));
     }
@@ -404,7 +410,8 @@ int vk_astc_gpu(void) {
 
 int vk_astc_bc(void) {
     VkCtx *c = vk_ctx();
-    if (!c || vk_astc_mode() != VK_ASTC_GPU) return 0;
+    int m = c ? vk_astc_mode() : -1;
+    if (m != VK_ASTC_GPU && m != VK_ASTC_CPU) return 0;
     plat_mutex_lock_shared(&g_lock);
     int on = G.dev == c->device && G.bc;
     plat_mutex_unlock_shared(&g_lock);
