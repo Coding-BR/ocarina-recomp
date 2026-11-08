@@ -1,4 +1,4 @@
-// LOCAL TEST (Ocarina, OOT_SCENE_FSR2=1): AMD FidelityFX Super Resolution 2.2 in place of the game's upscaler
+// LOCAL TEST (Ocarina, scene_upscaler = fsr2): AMD FidelityFX Super Resolution 2.2 in place of the game's upscaler
 // (vk_exec_draw.c big_compute_blit). AMD's FSR 2.2 core and Vulkan backend (runtime/third_party/fsr2, MIT,
 // unmodified) are compiled here; their shaders come from tools/build_fsr2_shaders.py (fsr2_shaders_gen.h) in place of
 // AMD's FidelityFX_SC tables, for the one set of options the context below uses: LDR colour, render-resolution motion

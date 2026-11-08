@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "fg_depth_spv.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -39,14 +40,10 @@ static struct {
     uint64_t seq;          // copies made
 } M = {.latest = -1, .written = -1};
 
-// LOCAL TEST: OOT_SCENE_TAA=1, the scene's temporal anti-aliasing (vk_exec_draw.c), also needs the camera and depth.
+// LOCAL TEST: scene_upscaler = taa or fsr2 (vk_exec_draw.c) needs the camera and depth too.
 int oot_motion_scene_taa(void) {
-    static int on = -1;
-    if (on < 0) {   // OOT_SCENE_FSR2=1 (vk_exec_draw.c scene_fsr2) needs them too
-        const char *e = getenv("OOT_SCENE_TAA"), *f = getenv("OOT_SCENE_FSR2");
-        on = (e && *e == '1') || (f && *f == '1');
-    }
-    return on;
+    const char *v = cfg_value("TOTK_SCENE_UPSCALER");   // taa and fsr2 (vk_exec_draw.c) take the camera and depth
+    return !strcmp(v, "taa") || !strcmp(v, "fsr2");
 }
 
 static int init(VkCtx *c) {

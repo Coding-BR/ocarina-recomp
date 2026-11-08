@@ -15,11 +15,14 @@ How Ocarina's picture reaches the window, what each option does, and why some we
 
 | Setting | Where | What |
 |---|---|---|
-| (default) | scene, step 2 | AMD FSR 1 EASU (`oot_scene_easu.comp`); `OOT_SCENE_EASU=0`: bilinear |
-| `OOT_SCENE_TAA=1` | scene, step 2 | temporal anti-aliasing (`oot_taa.comp`) before EASU, with camera motion vectors |
-| `OOT_SCENE_FSR2=1` | scene, step 2 | AMD FSR 2.2 (`vk_fsr2.cpp`, `runtime/third_party/fsr2`, MIT) with camera motion vectors |
+| `scene_upscaler = easu` (default) | scene, step 2 | AMD FSR 1 EASU (`oot_scene_easu.comp`) |
+| `scene_upscaler = bilinear` | scene, step 2 | the bilinear sample of `oot_scene.comp` |
+| `scene_upscaler = taa` | scene, step 2 | temporal anti-aliasing (`oot_taa.comp`) before EASU, with camera motion vectors |
+| `scene_upscaler = fsr2` | scene, step 2 | AMD FSR 2.2 (`vk_fsr2.cpp`, `runtime/third_party/fsr2`, MIT) with camera motion vectors; RCAS at `sharpness` |
 | `upscaler = fsr` / `bilinear` | present, step 3 | AMD FSR 1 EASU + RCAS to the window (`sharpness`) |
-| `framegen = 2..4` | present | frame interpolation (`vk_framegen.c`, after NotRexed/Hookshot) |
+| `framegen = 2..4` | present | frame interpolation (`vk_framegen.c`, after NotRexed/Hookshot); 1: off |
+
+All of them are in `[display]` of `totk.ini` and in the in-game menu (Screen, Picture), and apply at the next frame.
 
 The motion vectors come from the scene depth and the camera of each frame, taken from the game's sun-visibility probe
 (`oot_motion.c`). They are exact for the camera's motion and the static world; moving objects (Link, foliage in the

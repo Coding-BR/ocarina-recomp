@@ -3651,7 +3651,13 @@ static void op_draw_mesh_ind(VkExec *ex, const p_draw_mesh_ind *d) {
 
 // ---- dispatch and uniform buffer updates
 
-// LOCAL TEST (Ocarina, OOT_SCENE_FSR2=1): AMD FSR 2.2 (vk_fsr2.cpp) in place of the stand-in upscale. oot_fsr2_prep.comp
+// [display] scene_upscaler (TOTK_SCENE_UPSCALER, live): 0 easu, 1 bilinear, 2 taa (then easu), 3 fsr2.
+static int scene_mode(void) {
+    const char *v = cfg_value("TOTK_SCENE_UPSCALER");
+    return !strcmp(v, "bilinear") ? 1 : !strcmp(v, "taa") ? 2 : !strcmp(v, "fsr2") ? 3 : 0;
+}
+
+// LOCAL TEST (Ocarina, scene_upscaler = fsr2): AMD FSR 2.2 (vk_fsr2.cpp) in place of the stand-in upscale. oot_fsr2_prep.comp
 // writes its inputs at the render resolution (linear colour, motion vectors from the camera, a copy of the depth) into
 // images it owns; they go to SHADER_READ_ONLY_OPTIMAL for FSR 2, which reads them in that layout, and back to GENERAL
 // (contents discarded) the next frame. 1: FSR 2 wrote dst; 0: not this frame (the caller upscales as before).
@@ -3672,8 +3678,8 @@ static int scene_fsr2(VkExec *ex, VkImageView src, uint32_t w, uint32_t h, const
     static int have;
     static uint64_t last_seq, last_ns;
     static OotMotionFrame last;
-    if (on < 0) { const char *e = getenv("OOT_SCENE_FSR2"); on = e && *e == '1'; }
-    if (!on) return 0;
+    (void)on;
+    if (scene_mode() != 3) return have = 0, 0;
     VkCtx *c = vk_ctx();
     if (ok < 0) {
         ok = 0;
@@ -3760,8 +3766,7 @@ static int scene_fsr2(VkExec *ex, VkImageView src, uint32_t w, uint32_t h, const
     float dt = last_ns && now > last_ns ? (float)((now - last_ns) / 1e6) : 16.7f;
     last_ns = now;
     float far_ = mo.near_ / (mo.lin_y + mo.lin_x), fovy = 2.0f * atanf(1.0f / mo.p11);
-    static float sharp = -1;
-    if (sharp < 0) { const char *e = getenv("OOT_SCENE_FSR2_SHARPNESS"); sharp = e ? (float)atof(e) : 0.3f; }
+    float sharp = (float)cfg_int("TOTK_SHARPNESS") / 100.0f;   // the menu's FSR sharpness, as the window's FSR 1 takes it
     // FSR 2's backend calls vkCmd* through its own function pointers, past the recorder thread (vk_rec.h): the recorder
     // makes every call queued so far first, and is idle while FSR 2 records (TOTK_VK_RECORDER on: the device was lost)
     rec_drain();
@@ -3774,7 +3779,7 @@ static int scene_fsr2(VkExec *ex, VkImageView src, uint32_t w, uint32_t h, const
     return r;
 }
 
-// LOCAL TEST (Ocarina, OOT_SCENE_TAA=1): temporal anti-aliasing of the scene (oot_taa.comp) before the stand-in
+// LOCAL TEST (Ocarina, scene_upscaler = taa): temporal anti-aliasing of the scene (oot_taa.comp) before the stand-in
 // upscale, with this frame's depth and camera from oot_motion.c. The result (RGBA16F, the same square-root space) is
 // what the upscale reads; VK_NULL_HANDLE: no pass (no camera yet, or a setup failure), the upscale reads src.
 static VkImageView scene_taa(VkExec *ex, VkImageView src, uint32_t w, uint32_t h) {
@@ -3790,9 +3795,7 @@ static VkImageView scene_taa(VkExec *ex, VkImageView src, uint32_t w, uint32_t h
     static int cur, have;
     static uint64_t last_seq;
     static OotMotionFrame last;
-    static int taa_on = -1;
-    if (taa_on < 0) { const char *e = getenv("OOT_SCENE_TAA"); taa_on = e && *e == '1'; }
-    if (!taa_on) return VK_NULL_HANDLE;
+    if (scene_mode() != 2) return have = 0, VK_NULL_HANDLE;
     VkCtx *c = vk_ctx();
     if (ok < 0) {
         ok = 0;
@@ -3825,7 +3828,7 @@ static VkImageView scene_taa(VkExec *ex, VkImageView src, uint32_t w, uint32_t h
         vkDestroyShaderModule(c->device, m, NULL);
         if (r != VK_SUCCESS) return VK_NULL_HANDLE;
         ok = 1;
-        rt_log("vk: the scene's temporal anti-aliasing is on (OOT_SCENE_TAA)");
+        rt_log("vk: the scene's temporal anti-aliasing is on (scene_upscaler = taa)");
     }
     if (!ok) return VK_NULL_HANDLE;
     OotMotionFrame mo;
@@ -3979,9 +3982,8 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
     static VkPipelineLayout layout;
     static VkSampler samp;
     static PFN_vkCmdPushDescriptorSetKHR push;
-    // OOT_SCENE_EASU=0: the bilinear sample of oot_scene.comp; else FSR 1 EASU (oot_scene_easu.comp), sharper edges
-    static int use_easu = -1;
-    if (use_easu < 0) { const char *e = getenv("OOT_SCENE_EASU"); use_easu = !(e && *e == '0'); }
+    // scene_upscaler = bilinear: the bilinear sample of oot_scene.comp; else FSR 1 EASU (oot_scene_easu.comp), sharper edges
+    const int use_easu = scene_mode() != 1;
     if (!pipe) {
         VkDevice dev = vk_ctx()->device;
         push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(dev, "vkCmdPushDescriptorSetKHR");
@@ -4009,12 +4011,12 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
         vkDestroyShaderModule(dev, m, NULL);
         VkShaderModuleCreateInfo me = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof oot_scene_easu_spv,
                                        .pCode = oot_scene_easu_spv};
-        if (use_easu && vkCreateShaderModule(dev, &me, NULL, &m) == VK_SUCCESS) {
+        if (vkCreateShaderModule(dev, &me, NULL, &m) == VK_SUCCESS) {
             ci.stage.module = m;
             if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &easu) != VK_SUCCESS) easu = VK_NULL_HANDLE;
             vkDestroyShaderModule(dev, m, NULL);
         }
-        rt_log("vk: the game's upscaler is stood in for by %s", easu ? "FSR 1 EASU" : "a bilinear sample");
+        rt_log("vk: the game's upscaler is stood in for by FSR 1 EASU%s (scene_upscaler)", easu ? "" : ": not built, bilinear");
     }
     VkImageView dv = vk_exec_target_view(dst, dst->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1, 0);
     if (scene_fsr2(ex, e5_view, src->width, src->height, dst, dv)) {
@@ -4029,9 +4031,10 @@ static int big_compute_blit(VkExec *ex, const GfxShader *cs) {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0]},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[1]}};
     float inv[2] = {1.0f / (float)dst->width, 1.0f / (float)dst->height};
-    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, easu ? easu : pipe);
+    VkPipeline sp = use_easu && easu ? easu : pipe;
+    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, sp);
     rec_push(push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 2, w);   // through the recorder, in order with the rest
-    if (easu) {
+    if (sp == easu) {
         float pc[8] = {(float)src->width, (float)src->height, (float)src->width, (float)src->height, (float)dst->width,
                        (float)dst->height, 0, 0};
         vkCmdPushConstants(ex->cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
