@@ -496,6 +496,13 @@ static void game_defaults(void) {
     }
 }
 
+#ifdef _WIN32
+// Hybrid-graphics laptops (NVIDIA Optimus, AMD PowerXpress) run the game on the dedicated GPU, as Hookshot
+// does in host/hos_main.c.
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+#endif
+
 int main(int argc, char **argv) {
     game_defaults();
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
