@@ -2224,8 +2224,8 @@ static uint32_t vs_union_missing(const VkPipeState *s, GfxShaderIo fin[32]) {
 
 // pipeline-crash.txt next to pipeline-keys.bin: the crash note of each graphics pipeline the driver crashed in
 // (platform last-chance filter), a line per crash. An RX 6750 XT crashed in amdvlk64.dll building a mesh pipeline
-// early in play. Crashed once: built without optimization. Twice: not built, its draws are skipped. Deleting the file
-// tries them all again.
+// early in play. Crashed once: built without optimization (a mesh pipeline: not built). Twice: not built, its draws
+// are skipped. Deleting the file tries them all again.
 static char *crashed;   // the file's text; written once at init (keys_open), read by the build threads
 static void crashed_open(const char *keys_path) {
     static char path[1024];
@@ -2465,9 +2465,11 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
         }
     }
     int crashes = crash_count(note);
-    if (crashes >= 2) {
+    // A mesh pipeline is skipped after one crash: AMD's driver (amdvlk64.dll+0xf3c1af on an RX 9070 XT, #153, #157)
+    // crashed in the same mesh pipeline without optimization too, so the game only started on the third try.
+    if (crashes >= (mesh_vs(s) ? 1 : 2)) {
         static volatile int32_t told;
-        if (plat_inc32(&told) <= 8) rt_log("vk_pipeline: not built, the driver crashed in it twice: %s", note);
+        if (plat_inc32(&told) <= 8) rt_log("vk_pipeline: not built, the driver crashed in it before: %s", note);
         goto out;
     }
     if (crashes) {
