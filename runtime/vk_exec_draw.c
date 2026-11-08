@@ -2888,7 +2888,24 @@ static void draw_why(const VkExec *ex, const char *why) {
            (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
 }
 
+void vk_exec_forget_compute(void) { B.pipe[1] = VK_NULL_HANDLE; }
+
+// LOCAL TEST (Ocarina): the sun-visibility probe's draw hands its camera and depth to oot_motion.c (frame interpolation)
+static void motion_probe(VkExec *ex) {
+    static const void *last;
+    static int hit;
+    if (!ex->prog) return;
+    if (ex->prog != last) {
+        const uint8_t *ctl, *code;
+        uint32_t len;
+        last = ex->prog;
+        hit = find_stage(ex->prog, NVN_STAGE_VS, &ctl, &code, &len) && nvn2_origin(code) == 0xe0da18529f3a86d0ull;
+    }
+    if (hit) oot_motion_note(ex);
+}
+
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
+    motion_probe(ex);
     {   // LOCAL TEST (Ocarina): OOT_ONLY_MESH=1: in the full-resolution passes, only mesh draws, to see what they produce
         static int only = -1;
         if (only < 0) only = getenv("OOT_ONLY_MESH") != NULL;
