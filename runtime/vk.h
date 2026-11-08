@@ -23,6 +23,11 @@ typedef struct VkCtx {
     uint32_t gfx_family;                    // graphics + compute + presentation on win32
     uint32_t xfer_family;                   // a transfer-only family when the GPU has one, else gfx_family
     VkQueue gfx_queue;                      // graphics + present
+    // A second queue of gfx_family only for vkQueuePresentKHR, synchronised by the present lock (gfx_present.c g_pl)
+    // instead of vk_queue_lock: AMD's Windows driver can block inside the present while presents are queued ahead of
+    // the display, and with the queue lock held there the game's next submission waited forever (frozen picture).
+    // Only on that driver unless TOTK_PRESENT_QUEUE=1; equals gfx_queue otherwise, and when the family has one queue.
+    VkQueue present_queue;
     VkQueue xfer_queue;                     // equals gfx_queue when xfer_shared
     int xfer_shared;                        // 1: no separate queue; serialise with gfx_queue
     VmaAllocator vma;
@@ -397,6 +402,7 @@ void vk_texture_census(VkTexCensus *s);
 
 void vk_texture_shutdown(void);                     // vk_mem_shutdown calls it
 void vk_texture_new_submit(void);                   // a queue submit starts: draw bindings check storage again
+void vk_texture_vram_short(uint64_t bytes);         // an allocation failed: old released textures go at the next submit
 uint32_t vk_texture_epoch(void);                    // the write-watch snapshot epoch vk_texture_new_submit started
 VkSampler vk_sampler_by_id(const dpool_ref *pool, int id);
 VkSampler vk_sampler_for(const samp_par *s);        // cached by content
@@ -542,6 +548,7 @@ int vk_pipeline_async_on(void);   // 1 after vk_pipeline_async_enable: graphics 
 // cached under the current translator from their stored inputs, and builds every recorded pipeline, on all cores.
 // No-op without vk_pipeline_async_enable, with TOTK_PIPE_PREBUILD=0 or with TOTK_GPU=null.
 void vk_pipeline_prewarm(void);
+int vk_pipeline_keeps_binaries(void);  // 1 on the drivers that keep pipeline binaries, 0 elsewhere, -1 before the device exists
 void vk_pipeline_prep_compute(void);   // TOTK_PREWARM_ONLY: recorded big compute shaders built once, kept as binaries
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info);
 int vk_pipeline_compute_ready(const GfxShader *cs);   // LOCAL TEST (Ocarina): 0 while a big compute shader builds in the background

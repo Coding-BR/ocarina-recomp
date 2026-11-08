@@ -473,10 +473,12 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VkBuffer sb;
     VmaAllocation sa;
-    if (vmaCreateBuffer(c->vma, &bi, &aci, &sb, &sa, NULL) != VK_SUCCESS) {
+    VkResult scratch = vmaCreateBuffer(c->vma, &bi, &aci, &sb, &sa, NULL);
+    if (scratch != VK_SUCCESS) {
+        vk_texture_vram_short((uint64_t)bi.size);
         if (plat_inc32(&n_fail) <= 16)
-            rt_log("vk: ASTC scratch buffer of %llu bytes failed: texture left undecoded",
-                   (unsigned long long)(cap_in + cap_out));
+            rt_log("vk: ASTC scratch buffer of %llu bytes failed (%d): texture left undecoded for now",
+                   (unsigned long long)bi.size, (int)scratch);
         return 0;
     }
     plat_mutex_lock(&g_lock);
