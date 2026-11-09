@@ -1483,8 +1483,16 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         if (slack == ~0ull) { const char *e = getenv("OOT_SSBO_SLACK"); slack = e ? strtoull(e, NULL, 0) : 0; }
         uint64_t extra = st == NVN_STAGE_CS && !ubo && b->size ? slack : 0;
         if (bind_range(ex, b->addr - lead, b->size ? b->size + lead + extra : 0, align, max, ubo ? VK_MUSE_UBO : VK_MUSE_SSBO,
-                       written, guarded, &bi)) {
-            if (written && bi.buffer != VK_NULL_HANDLE) {
+                       written && !(r->cbuf_slot == 30 && !guarded), guarded, &bi)) {
+            // A bare table entry (translator patch 0024: a pointer read from a bound table) has no declared size: the
+            // shader writes a small culling record through it (the culling passes count instances with atomics). Marking
+            // the whole guessed range written copied a large span back every submission and overwrote the CPU's data;
+            // marking none lost the counts when the mirror was synced from guest memory (trees flickered or stretched
+            // into columns). Only the first 64 bytes are the record. Port of the Miojo Linux package's fix (2026-11-09).
+            int bare = r->cbuf_slot == 30 && !guarded;
+            uint64_t mark = bare ? (bi.range && bi.range < 64 ? bi.range : 64)
+                                 : (guarded && bi.range > WRITTEN_CAP ? WRITTEN_CAP : bi.range);
+            if ((written || bare) && bi.buffer != VK_NULL_HANDLE) {
                 {   // LOCAL TEST (Ocarina): OOT_WB_LOG=<present>: what is marked written, by stage, guarded and size, in one present
                     static long wb_at = -2;
                     static int wb_n;
@@ -1493,11 +1501,19 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
                     if (wb_at >= 0 && wf >= wb_at && wf < wb_at + 2 && bi.range >= 0x100000 && wb_n++ < 400)
                         rt_log("wb: stage %d guarded %d c%d+%#x addr %#llx size %#llx range %#llx prog %llu", st, guarded, r->cbuf_slot, r->handle * 4, (unsigned long long)b->addr, (unsigned long long)b->size, (unsigned long long)bi.range, ex->prog ? (unsigned long long)ex->prog->serial : 0ull);
                 }
-                note_written(ex, b->addr - lead, guarded && bi.range > WRITTEN_CAP ? WRITTEN_CAP : bi.range);
+                note_written(ex, b->addr - lead, mark);
+                if (bare) {   // bind_range marked nothing for a bare entry: its mirror write-back must carry the record
+                    VkMemSpan sp;
+                    if (vk_mem_resolve(b->addr - lead, mark, &sp)) {
+                        VK_MEM_USE(sp);
+                        vk_mem_gpu_wrote(&sp, mark);
+                    }
+                    vk_usnap_drop(b->addr - lead, mark);
+                }
                 const uint8_t *ctl, *code;
                 uint32_t len;
                 if (vk_sync_noting() && ex->prog && find_stage(ex->prog, st, &ctl, &code, &len))
-                    vk_sync_note_write(b->addr - lead, bi.range, nvn2_origin(code));
+                    vk_sync_note_write(b->addr - lead, mark, nvn2_origin(code));
             }
             return bi;
         }
