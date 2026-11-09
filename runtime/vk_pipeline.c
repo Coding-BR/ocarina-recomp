@@ -4769,7 +4769,20 @@ int vk_pipeline_warm_big_cs(void) {
     fflush(stdout);
     uint64_t t_all = plat_now_ns();
     int failed = 0;
+    // OOT_WARM_BUDGET_S: no new build starts after that many seconds (the installer sets it; an AMD card took 3 hours for
+    // the list, #188). What is left is built in play as before; the list is smallest first, so the quick ones are done.
+    const char *be = getenv("OOT_WARM_BUDGET_S");
+    double budget = be ? atof(be) : 0;
     for (size_t i = 0; i < m; i++) {
+        double spent = (double)(plat_now_ns() - t_all) / 1e9;
+        if (budget > 0 && spent > budget) {
+            printf("warm-big-cs: time budget of %.0f s reached after %zu of %zu: the %zu left are built in play\n", budget, i, m,
+                   m - i);
+            break;
+        }
+        // "[i/m]": the installer's progress bar reads it (Instalar-Ocarina.ps1 Atualizar)
+        printf("warm-big-cs: [%zu/%zu] building a compute shader of %llu words\n", i + 1, m, (unsigned long long)tw[i]);
+        fflush(stdout);
         Bindings B = {0};
         const char *why = NULL;
         plat_mutex_lock(&P.lock);
