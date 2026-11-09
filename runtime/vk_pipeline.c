@@ -2637,7 +2637,18 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     uint64_t vw, fw;
     const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
     uint32_t *vpatched = NULL, *fpatched = NULL;
-    if (!s->gs && l->set1) {   // independent layouts: outputs from the vertex shader's union
+    // AMD: no outputs are added to a mesh shader. Vertex-style outputs added to a mesh module make AMD's compiler (LLPC,
+    // amdvlk64.dll+0xf3c1af) crash or fail: the same module rebuilt outside the game without them builds in 45 ms
+    // (found by Lu33Y-No-Git, #158; RX 9070 XT #153 #157, RX 5700 XT #188: 9 mesh pipelines failed, the foliage drew no
+    // leaves). The fragment stage reads those inputs undefined, as before outputs were added. OOT_MESH_ADD_OUTPUTS=1: added
+    // anyway (=0 on every GPU).
+    static int mesh_add = -2;
+    if (mesh_add == -2) {
+        const char *e = getenv("OOT_MESH_ADD_OUTPUTS");
+        mesh_add = e && *e ? *e != '0' : -1;
+    }
+    int add_ok = !mesh_vs(s) || (mesh_add == -1 ? !vk_caps.amd : mesh_add);
+    if (!s->gs && l->set1 && add_ok) {   // independent layouts: outputs from the vertex shader's union
         GfxShaderIo fin[32];
         uint32_t missing = vs_union_missing(s, fin);
         if (missing) {
@@ -2657,7 +2668,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
                 else if (vout[i].type != fin[i].type)
                     LOG_ONCE("vk_pipeline: varying %d is type %d in the vertex stage, %d in the fragment stage", i, vout[i].type, fin[i].type);
             }
-            if (missing && !l->set1) {
+            if (missing && !l->set1 && add_ok) {
                 uint64_t n2 = 0;
                 vpatched = spirv_add_outputs(vcode, vw, missing, fin, &n2);
                 if (!vpatched) LOG_ONCE("vk_pipeline: cannot add missing vertex outputs (mask %#x)", missing);
